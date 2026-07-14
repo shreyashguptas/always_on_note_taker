@@ -39,6 +39,12 @@ Two tabs:
 
 iOS allows continuous background microphone recording only while the app is actively capturing audio, and it always shows the orange microphone indicator. Phone calls, Siri, and other exclusive audio apps interrupt recording; EchoNotes resumes automatically as soon as the system allows. Force-quitting the app (or rebooting) stops recording until you reopen the app — that's a platform rule, not a bug. In-flight sessions are recovered on next launch.
 
+## Known limitations (v1)
+
+- **Playing a note while recording is on**: playback comes out of the speaker while the mic keeps capturing, so the recording (and its transcript) will pick up the played audio. Pause listening if you don't want that.
+- **Toggling recording on/off while a note is playing** reconfigures the shared audio session and may stop the playback.
+- UI strings and duration formatting are English-only in v1 (transcription itself follows your device language when supported).
+
 ## Privacy
 
 Everything — audio, transcripts, summaries — is processed and stored on your device. The app makes no network requests. Airplane mode is a fine way to verify.

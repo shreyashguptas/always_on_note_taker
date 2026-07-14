@@ -23,3 +23,15 @@ extension AVAudioPCMBuffer {
         return copy
     }
 }
+
+extension Array where Element == AVAudioPCMBuffer {
+    /// Evicts oldest buffers until the queue holds at most `cap` seconds.
+    /// `accumulatedSeconds` is the caller-maintained running total for this
+    /// array and is decremented as buffers are evicted.
+    mutating func trimToDuration(cap: TimeInterval, accumulatedSeconds: inout TimeInterval) {
+        while accumulatedSeconds > cap, !isEmpty {
+            let removed = removeFirst()
+            accumulatedSeconds -= Double(removed.frameLength) / removed.format.sampleRate
+        }
+    }
+}

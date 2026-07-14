@@ -18,11 +18,12 @@ enum Persistence {
     }
 
     /// Directory that holds one .m4a per session, under Application Support.
-    static var recordingsDirectory: URL {
+    /// Created once per launch, not on every access.
+    static let recordingsDirectory: URL = {
         let base = URL.applicationSupportDirectory.appending(path: "Recordings", directoryHint: .isDirectory)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base
-    }
+    }()
 
     static func audioURL(forFileName fileName: String) -> URL {
         recordingsDirectory.appending(path: fileName)

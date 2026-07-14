@@ -171,13 +171,19 @@ enum SummarizationService {
             let window = remaining.prefix(limit)
             var cut = window.endIndex
 
-            // Prefer a sentence boundary, then any whitespace.
+            // Prefer a sentence boundary, then any whitespace — always cutting
+            // AFTER the boundary character so each iteration must advance.
             if let sentenceEnd = window.lastIndex(where: { ".!?\n".contains($0) }),
                window.distance(from: window.startIndex, to: sentenceEnd) > limit / 2 {
                 cut = window.index(after: sentenceEnd)
-            } else if let space = window.lastIndex(where: { $0 == " " }) {
-                cut = space
+            } else if let space = window.lastIndex(where: { $0 == " " }),
+                      space > window.startIndex {
+                cut = window.index(after: space)
             }
+
+            // Forced progress: a single token longer than `limit` (spoken-out
+            // URL, run-on) gets hard-cut rather than looping forever.
+            if cut <= remaining.startIndex { cut = window.endIndex }
 
             let piece = remaining[remaining.startIndex..<cut]
                 .trimmingCharacters(in: .whitespacesAndNewlines)

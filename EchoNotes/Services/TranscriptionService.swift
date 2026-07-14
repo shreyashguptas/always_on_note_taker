@@ -25,7 +25,6 @@ final class TranscriptionService {
     private let locale: Locale
 
     private var analyzer: SpeechAnalyzer?
-    private var transcriber: SpeechTranscriber?
     private let inputSequence: AsyncStream<AnalyzerInput>
     private let inputBuilder: AsyncStream<AnalyzerInput>.Continuation
     private var resultsTask: Task<Void, Never>?
@@ -37,6 +36,9 @@ final class TranscriptionService {
     private var converter: AudioBufferConverter?
     private var pendingBuffers: [AVAudioPCMBuffer] = []
     private var pendingSeconds: TimeInterval = 0
+    /// Set only after every startup-held buffer has been flushed, so live
+    /// buffers can't jump the queue ahead of the pre-roll.
+    private var ready = false
     private var finished = false
     /// Fallback clock (seconds fed to the analyzer) used when a result carries
     /// no audio time range.
@@ -61,7 +63,6 @@ final class TranscriptionService {
             attributeOptions: [.audioTimeRange]
         )
         let analyzer = SpeechAnalyzer(modules: [transcriber])
-        self.transcriber = transcriber
         self.analyzer = analyzer
 
         let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber])
@@ -88,18 +89,30 @@ final class TranscriptionService {
             return
         }
 
-        // Analyzer is live: flush everything buffered while it started.
+        // Analyzer is live: drain everything buffered while it started.
+        // `ready` flips only once the pending queue is empty at a lock check,
+        // so buffers that arrive mid-drain append behind the held ones and
+        // temporal order into the analyzer is preserved.
         lock.lock()
         if let format {
             converter = AudioBufferConverter(outputFormat: format)
         }
-        let held = pendingBuffers
-        pendingBuffers.removeAll()
-        pendingSeconds = 0
         lock.unlock()
 
-        for buffer in held {
-            convertAndYield(buffer)
+        while true {
+            lock.lock()
+            if pendingBuffers.isEmpty {
+                ready = true
+                lock.unlock()
+                break
+            }
+            let batch = pendingBuffers
+            pendingBuffers.removeAll()
+            pendingSeconds = 0
+            lock.unlock()
+            for buffer in batch {
+                convertAndYield(buffer)
+            }
         }
     }
 
@@ -111,15 +124,15 @@ final class TranscriptionService {
             lock.unlock()
             return
         }
-        if converter == nil {
+        if !ready {
             // Hold audio while the analyzer starts, bounded in case startup
             // stalls; oldest audio drops first.
             pendingBuffers.append(buffer)
             pendingSeconds += Double(buffer.frameLength) / buffer.format.sampleRate
-            while pendingSeconds > AppSettings.transcriptionHoldSeconds, !pendingBuffers.isEmpty {
-                let removed = pendingBuffers.removeFirst()
-                pendingSeconds -= Double(removed.frameLength) / removed.format.sampleRate
-            }
+            pendingBuffers.trimToDuration(
+                cap: AppSettings.transcriptionHoldSeconds,
+                accumulatedSeconds: &pendingSeconds
+            )
             lock.unlock()
             return
         }

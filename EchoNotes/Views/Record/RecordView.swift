@@ -3,6 +3,7 @@ import SwiftUI
 struct RecordView: View {
     @Environment(RecordingCoordinator.self) private var coordinator
     @Environment(\.scenePhase) private var scenePhase
+    @State private var isVisible = false
 
     var body: some View {
         NavigationStack {
@@ -45,12 +46,19 @@ struct RecordView: View {
             }
             .navigationTitle("EchoNotes")
             .navigationBarTitleDisplayMode(.inline)
-            // Waveform updates are pure UI; don't pay for them when the tab
-            // isn't visible or the app is in the background.
-            .onAppear { coordinator.setLevelUpdatesWanted(scenePhase == .active) }
-            .onDisappear { coordinator.setLevelUpdatesWanted(false) }
+            // Waveform updates are pure UI; don't pay for them unless this
+            // tab is visible AND the app is foreground. (scenePhase changes
+            // reach retained-but-hidden tabs too, hence the isVisible check.)
+            .onAppear {
+                isVisible = true
+                coordinator.setLevelUpdatesWanted(scenePhase == .active)
+            }
+            .onDisappear {
+                isVisible = false
+                coordinator.setLevelUpdatesWanted(false)
+            }
             .onChange(of: scenePhase) { _, phase in
-                coordinator.setLevelUpdatesWanted(phase == .active)
+                coordinator.setLevelUpdatesWanted(isVisible && phase == .active)
             }
         }
     }

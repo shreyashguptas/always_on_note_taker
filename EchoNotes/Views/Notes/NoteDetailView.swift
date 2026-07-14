@@ -43,8 +43,8 @@ struct NoteDetailView: View {
 
     /// Tapping a transcript timestamp starts playback at that moment.
     private func seekFromTranscript(_ time: TimeInterval) {
-        if !playback.isLoaded, let fileName = session.audioFileName {
-            playback.load(url: Persistence.audioURL(forFileName: fileName))
+        if !playback.isLoaded, let url = session.audioFileURL {
+            playback.load(url: url)
         }
         guard playback.isLoaded else { return }
         playback.playFrom(time)

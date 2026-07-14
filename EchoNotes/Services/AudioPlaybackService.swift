@@ -19,6 +19,12 @@ final class AudioPlaybackService: NSObject, AVAudioPlayerDelegate {
     private var player: AVAudioPlayer?
     private var ticker: Timer?
 
+    deinit {
+        // Normally .onDisappear stops playback first; this catches teardown
+        // paths that skip it so the repeating timer can't outlive the service.
+        ticker?.invalidate()
+    }
+
     func load(url: URL) {
         guard player?.url != url else { return }
         stop()

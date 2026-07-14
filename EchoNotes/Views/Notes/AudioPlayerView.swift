@@ -33,8 +33,8 @@ struct AudioPlayerView: View {
         }
         .padding(.horizontal, 24)
         .onAppear {
-            if let fileName = session.audioFileName {
-                playback.load(url: Persistence.audioURL(forFileName: fileName))
+            if let url = session.audioFileURL {
+                playback.load(url: url)
             }
         }
     }

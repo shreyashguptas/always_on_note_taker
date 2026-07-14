@@ -35,6 +35,12 @@ final class SessionPipeline {
     /// Gate closed by stop(): buffers that race in while a stop is settling
     /// (the tap is torn down asynchronously) must not start a new session.
     private var accepting = false
+    /// Tap-thread mirror of `accepting` so buffers can be dropped before the
+    /// deep copy + queue hop when the gate is closed.
+    private let fastGate = AtomicFlag()
+    /// Whether anyone is watching the waveform; when unset, level events are
+    /// skipped at the source instead of waking the main queue to do nothing.
+    private let levelGate = AtomicFlag(true)
 
     // Pre-roll kept while waiting for speech.
     private var preRoll: [AVAudioPCMBuffer] = []
@@ -55,16 +61,26 @@ final class SessionPipeline {
 
     // MARK: - Gate
 
-    /// Opens the pipeline for new sessions. Called after capture (re)starts.
+    /// Opens the pipeline for new sessions. Called before/after capture
+    /// (re)starts.
     func beginAccepting() {
+        fastGate.set(true)
         queue.async { [self] in
             accepting = true
         }
     }
 
+    /// Waveform visibility: when false, level events aren't even dispatched.
+    func setLevelEmissionEnabled(_ enabled: Bool) {
+        levelGate.set(enabled)
+    }
+
     // MARK: - Ingest (called from the audio tap)
 
     func ingest(_ buffer: AVAudioPCMBuffer) {
+        // Cheap gate check first: while stopped, don't pay for the copy and
+        // queue hop just to drop the buffer on the other side.
+        guard fastGate.isSet else { return }
         // The tap's buffer is only guaranteed valid inside the tap callback;
         // everything downstream holds buffers (pre-roll, transcription hold),
         // so copy before leaving this thread.
@@ -80,7 +96,9 @@ final class SessionPipeline {
         let reading = vad.process(buffer)
         let bufferSeconds = Double(buffer.frameLength) / buffer.format.sampleRate
 
-        dispatchToMain(.level(reading.normalizedLevel))
+        if levelGate.isSet {
+            dispatchToMain(.level(reading.normalizedLevel))
+        }
 
         if var session = active {
             session.clock += bufferSeconds
@@ -147,8 +165,9 @@ final class SessionPipeline {
 
         // Report speech-trimmed duration for silence-terminated sessions so a
         // 90-second silent tail doesn't inflate the note's length.
+        // (lastSpeechAt already includes the VAD hangover tail.)
         let duration: TimeInterval = reason == .silence
-            ? min(session.clock, session.lastSpeechAt + AppSettings.vadHangover)
+            ? min(session.clock, session.lastSpeechAt)
             : session.clock
 
         let emitEvent = emit
@@ -170,6 +189,7 @@ final class SessionPipeline {
     /// gate so racing buffers can't start a new one. The completion runs on
     /// the main queue after pipeline state is settled.
     func stop(reason: EndReason, completion: (() -> Void)? = nil) {
+        fastGate.set(false)
         queue.async { [self] in
             accepting = false
             endActiveSession(reason: reason)
@@ -185,10 +205,7 @@ final class SessionPipeline {
     private func appendToPreRoll(_ buffer: AVAudioPCMBuffer, seconds: TimeInterval) {
         preRoll.append(buffer)
         preRollSeconds += seconds
-        while preRollSeconds > AppSettings.preRollDuration, !preRoll.isEmpty {
-            let removed = preRoll.removeFirst()
-            preRollSeconds -= Double(removed.frameLength) / removed.format.sampleRate
-        }
+        preRoll.trimToDuration(cap: AppSettings.preRollDuration, accumulatedSeconds: &preRollSeconds)
     }
 
     private func dispatchToMain(_ event: Event) {

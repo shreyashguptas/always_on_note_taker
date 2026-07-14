@@ -85,12 +85,11 @@ final class RecordingCoordinator {
     private let modelContext: ModelContext
     private var resumeTask: Task<Void, Never>?
     private var activeSessionID: UUID?
-    /// Monotonic per-session segment index; avoids faulting the whole
-    /// segments relationship just to count it on every append.
-    private var nextSegmentIndex = 0
+    /// Monotonic per-session segment indices; avoids faulting the whole
+    /// segments relationship just to count it on every append (including the
+    /// end-of-session burst after a session stops being "active").
+    private var segmentCounters: [UUID: Int] = [:]
     private var lastSegmentSave = Date.distantPast
-    /// The waveform only needs updates while the Record tab is visible.
-    private var levelUpdatesWanted = true
 
     init(modelContext: ModelContext) {
         self.modelContext = modelContext
@@ -182,7 +181,10 @@ final class RecordingCoordinator {
         liveFinalizedText = ""
         liveVolatileText = ""
         pipeline.stop(reason: .manualStop) { [weak self] in
-            self?.capture.stop()
+            // If the user re-enabled before this deferred stop landed, the
+            // fresh engine must not be torn down by the old disable.
+            guard let self, !self.isEnabled else { return }
+            self.capture.stop()
         }
         state = .off
         levels = Array(repeating: 0, count: levels.count)
@@ -193,9 +195,10 @@ final class RecordingCoordinator {
     /// Starts (or restarts) capture and opens the pipeline gate. Returns
     /// whether capture is running.
     private func restartCapture() -> Bool {
+        // Open the gate first so the very first tap buffers aren't dropped.
+        pipeline.beginAccepting()
         do {
             try capture.restart()
-            pipeline.beginAccepting()
             state = currentSessionStartedAt == nil ? .listening : .recording
             return true
         } catch {
@@ -259,19 +262,17 @@ final class RecordingCoordinator {
 
     // MARK: - Pipeline events
 
-    /// The Record tab calls this so waveform updates stop costing anything
-    /// while the tab isn't visible.
+    /// The Record tab calls this so waveform updates stop costing anything —
+    /// including the main-queue hop — while the tab isn't visible.
     func setLevelUpdatesWanted(_ wanted: Bool) {
-        levelUpdatesWanted = wanted
+        pipeline.setLevelEmissionEnabled(wanted)
     }
 
     private func handlePipelineEvent(_ event: SessionPipeline.Event) {
         switch event {
         case .level(let level):
-            if levelUpdatesWanted {
-                levels.removeFirst()
-                levels.append(level)
-            }
+            levels.removeFirst()
+            levels.append(level)
 
         case .sessionStarted(let id, let fileName, let startedAt):
             let session = RecordingSession(id: id, startedAt: startedAt)
@@ -280,7 +281,7 @@ final class RecordingCoordinator {
             modelContext.insert(session)
             try? modelContext.save()
             activeSessionID = id
-            nextSegmentIndex = 0
+            segmentCounters[id] = 0
             currentSessionStartedAt = startedAt
             liveFinalizedText = ""
             liveVolatileText = ""
@@ -303,6 +304,7 @@ final class RecordingCoordinator {
 
             if discarded || session == nil {
                 service?.cancel()
+                segmentCounters.removeValue(forKey: id)
                 Persistence.deleteAudioFile(named: fileName)
                 if let session {
                     modelContext.delete(session)
@@ -325,6 +327,7 @@ final class RecordingCoordinator {
 
     /// Called after the last transcript segment has been persisted.
     private func finalizeSession(id: UUID) {
+        segmentCounters.removeValue(forKey: id)
         guard let session = fetchSession(id: id) else { return }
         if session.segments.isEmpty {
             // Nothing intelligible was said; keep the recording but mark it done.
@@ -389,6 +392,7 @@ final class RecordingCoordinator {
         })
         guard let orphans = try? modelContext.fetch(descriptor), !orphans.isEmpty else { return }
 
+        var toSummarize: [UUID] = []
         for session in orphans where session.id != activeSessionID {
             let segments = session.sortedSegments
             if segments.isEmpty {
@@ -401,9 +405,21 @@ final class RecordingCoordinator {
             if session.endedAt == nil {
                 session.endedAt = session.startedAt.addingTimeInterval(lastEnd)
             }
-            summarize(session)
+            session.status = .summarizing
+            toSummarize.append(session.id)
         }
         try? modelContext.save()
+
+        // One note at a time: several crash-orphaned sessions must not spin
+        // up parallel language-model runs during a cold launch.
+        guard !toSummarize.isEmpty else { return }
+        Task { [weak self] in
+            for id in toSummarize {
+                guard let self, let session = self.fetchSession(id: id) else { continue }
+                let result = await SummarizationService.generateNote(from: session.fullTranscript)
+                self.attachNote(result, to: id)
+            }
+        }
     }
 
     // MARK: - Transcription callbacks (main queue)
@@ -415,15 +431,15 @@ final class RecordingCoordinator {
 
     private func appendSegment(_ segment: TranscriptionService.Segment, to id: UUID) {
         guard let session = fetchSession(id: id) else { return }
-        let isActive = id == activeSessionID
 
+        let index = segmentCounters[id] ?? session.segments.count
+        segmentCounters[id] = index + 1
         let stored = TranscriptSegment(
-            index: isActive ? nextSegmentIndex : session.segments.count,
+            index: index,
             text: segment.text,
             startTime: segment.startTime,
             endTime: segment.endTime
         )
-        if isActive { nextSegmentIndex += 1 }
         modelContext.insert(stored)
         stored.session = session
 
@@ -442,7 +458,7 @@ final class RecordingCoordinator {
             lastSegmentSave = .now
         }
 
-        if isActive {
+        if id == activeSessionID {
             liveFinalizedText = liveFinalizedText.isEmpty
                 ? segment.text
                 : liveFinalizedText + " " + segment.text

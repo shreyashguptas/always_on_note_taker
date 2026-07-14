@@ -151,8 +151,11 @@ final class AudioCaptureService {
               let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else { return }
 
         switch reason {
-        case .newDeviceAvailable, .oldDeviceUnavailable, .categoryChange, .override, .wakeFromSleep:
+        case .newDeviceAvailable, .oldDeviceUnavailable, .wakeFromSleep:
             // Input hardware (and thus the tap format) may have changed.
+            // .categoryChange/.override are deliberately excluded: this
+            // service's own start()/stop() category changes post them, and
+            // reacting would restart the engine we just started.
             onEvent?(.configurationChanged)
         default:
             break

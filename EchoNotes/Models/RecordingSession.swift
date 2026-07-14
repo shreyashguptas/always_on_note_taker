@@ -48,6 +48,12 @@ final class RecordingSession {
         set { statusRaw = newValue.rawValue }
     }
 
+    /// Resolved location of this session's recording, when one exists.
+    var audioFileURL: URL? {
+        guard let audioFileName, !audioFileName.isEmpty else { return nil }
+        return Persistence.audioURL(forFileName: audioFileName)
+    }
+
     var sortedSegments: [TranscriptSegment] {
         segments.sorted { $0.index < $1.index }
     }
