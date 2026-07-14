@@ -8,7 +8,7 @@ struct RootTabView: View {
             }
 
             Tab("Notes", systemImage: "note.text") {
-                Text("Notes")
+                NotesListView()
             }
         }
     }
