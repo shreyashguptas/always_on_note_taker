@@ -19,7 +19,10 @@ struct TagChipsRow: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            ForEach(tags, id: \.self) { TagChipView(tag: $0) }
+            // Offset-keyed so a duplicate tag string can't collide identities.
+            ForEach(Array(tags.enumerated()), id: \.offset) { _, tag in
+                TagChipView(tag: tag)
+            }
         }
     }
 }

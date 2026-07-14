@@ -145,12 +145,14 @@ enum SummarizationService {
     }
 
     private static func result(from payload: NotePayload) -> NoteResult {
+        // De-duplicate model output: repeated strings break SwiftUI ForEach
+        // identity, and lowercasing tags can itself create duplicates.
         NoteResult(
             title: payload.title.trimmingCharacters(in: CharacterSet(charactersIn: "\" .")),
             overview: payload.overview,
-            keyPoints: payload.keyPoints,
-            actionItems: payload.actionItems,
-            tags: payload.tags.map { $0.lowercased() },
+            keyPoints: payload.keyPoints.removingDuplicates(),
+            actionItems: payload.actionItems.removingDuplicates(),
+            tags: payload.tags.map { $0.lowercased() }.removingDuplicates(),
             generator: GeneratedNote.foundationModelsGenerator
         )
     }

@@ -9,6 +9,9 @@ struct NotesListView: View {
     @State private var searchText = ""
 
     var body: some View {
+        // Filter once per render; the grouping and empty-check share it.
+        let filtered = filteredSessions
+
         NavigationStack {
             Group {
                 if sessions.isEmpty {
@@ -17,10 +20,10 @@ struct NotesListView: View {
                         systemImage: "note.text",
                         description: Text("Turn on listening in the Record tab and start talking. Notes appear here automatically.")
                     )
-                } else if filteredSessions.isEmpty {
+                } else if filtered.isEmpty {
                     ContentUnavailableView.search(text: searchText)
                 } else {
-                    notesList
+                    notesList(groupedByDay(filtered))
                 }
             }
             .navigationTitle("Notes")
@@ -28,9 +31,9 @@ struct NotesListView: View {
         }
     }
 
-    private var notesList: some View {
+    private func notesList(_ groups: [(day: Date, sessions: [RecordingSession])]) -> some View {
         List {
-            ForEach(groupedByDay, id: \.day) { group in
+            ForEach(groups, id: \.day) { group in
                 Section(TimeFormatting.dayHeader(group.day)) {
                     ForEach(group.sessions) { session in
                         NavigationLink(value: session.id) {
@@ -54,6 +57,9 @@ struct NotesListView: View {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return sessions }
         return sessions.filter { session in
+            // Matches against the title, the denormalized transcript preview,
+            // and the generated note — deliberately NOT the full transcript,
+            // which would fault every segment of every session per keystroke.
             if session.displayTitle.localizedCaseInsensitiveContains(query) { return true }
             if session.transcriptPreview.localizedCaseInsensitiveContains(query) { return true }
             if let note = session.note {
@@ -62,13 +68,13 @@ struct NotesListView: View {
                 if note.actionItems.contains(where: { $0.localizedCaseInsensitiveContains(query) }) { return true }
                 if note.tags.contains(where: { $0.localizedCaseInsensitiveContains(query) }) { return true }
             }
-            return session.fullTranscript.localizedCaseInsensitiveContains(query)
+            return false
         }
     }
 
-    private var groupedByDay: [(day: Date, sessions: [RecordingSession])] {
+    private func groupedByDay(_ filtered: [RecordingSession]) -> [(day: Date, sessions: [RecordingSession])] {
         let calendar = Calendar.current
-        let groups = Dictionary(grouping: filteredSessions) { calendar.startOfDay(for: $0.startedAt) }
+        let groups = Dictionary(grouping: filtered) { calendar.startOfDay(for: $0.startedAt) }
         return groups
             .map { (day: $0.key, sessions: $0.value.sorted { $0.startedAt > $1.startedAt }) }
             .sorted { $0.day > $1.day }

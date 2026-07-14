@@ -20,21 +20,21 @@ enum FallbackSummarizer {
         }
 
         let frequencies = wordFrequencies(transcript)
-        let scored = sentences.enumerated().map { index, sentence in
-            (index: index, sentence: sentence, score: score(sentence, frequencies: frequencies))
-        }
+        let ranked = sentences.enumerated()
+            .map { index, sentence in
+                (index: index, sentence: sentence, score: score(sentence, frequencies: frequencies))
+            }
+            .sorted { $0.score > $1.score }
 
         // Overview: the two highest-scoring sentences, kept in spoken order.
-        let overview = scored
-            .sorted { $0.score > $1.score }
+        let overview = ranked
             .prefix(2)
             .sorted { $0.index < $1.index }
             .map(\.sentence)
             .joined(separator: " ")
 
         // Key points: next tier of informative sentences, spoken order.
-        let keyPoints = scored
-            .sorted { $0.score > $1.score }
+        let keyPoints = ranked
             .prefix(5)
             .sorted { $0.index < $1.index }
             .map { condense($0.sentence) }
@@ -77,24 +77,33 @@ enum FallbackSummarizer {
         "get", "got", "one", "two", "some", "any", "all", "lot", "bit",
     ]
 
-    private static func wordFrequencies(_ text: String) -> [String: Int] {
-        var frequencies: [String: Int] = [:]
+    /// Lowercased content words (stopwords and short words removed). Both the
+    /// frequency table and sentence scoring use this same tokenization so a
+    /// word is always counted and looked up under the same spelling.
+    private static func contentWords(in text: String) -> [String] {
+        var words: [String] = []
         let tokenizer = NLTokenizer(unit: .word)
         tokenizer.string = text
         tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
             let word = String(text[range]).lowercased()
             if word.count > 3, !stopwords.contains(word) {
-                frequencies[word, default: 0] += 1
+                words.append(word)
             }
             return true
+        }
+        return words
+    }
+
+    private static func wordFrequencies(_ text: String) -> [String: Int] {
+        var frequencies: [String: Int] = [:]
+        for word in contentWords(in: text) {
+            frequencies[word, default: 0] += 1
         }
         return frequencies
     }
 
     private static func score(_ sentence: String, frequencies: [String: Int]) -> Double {
-        let words = sentence.lowercased()
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { $0.count > 3 && !stopwords.contains($0) }
+        let words = contentWords(in: sentence)
         guard !words.isEmpty else { return 0 }
         let total = words.reduce(0.0) { $0 + Double(frequencies[$1] ?? 0) }
         // Normalize so long rambles don't automatically win.

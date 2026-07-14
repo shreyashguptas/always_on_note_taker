@@ -108,9 +108,13 @@ final class AudioPlaybackService: NSObject, AVAudioPlayerDelegate {
 
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         Task { @MainActor [weak self] in
-            self?.isPlaying = false
-            self?.currentTime = 0
-            self?.stopTicker()
+            guard let self else { return }
+            self.isPlaying = false
+            // Rewind the player itself, not just the published time, so the
+            // next play() starts from the beginning instead of the end.
+            self.player?.currentTime = 0
+            self.currentTime = 0
+            self.stopTicker()
         }
     }
 }

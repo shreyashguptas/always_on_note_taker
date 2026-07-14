@@ -63,7 +63,11 @@ final class AudioCaptureService {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         isRunning = false
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        let session = AVAudioSession.sharedInstance()
+        try? session.setActive(false, options: .notifyOthersOnDeactivation)
+        // Release the record-oriented category so playback (which treats
+        // .playAndRecord as "capture owns the session") configures its own.
+        try? session.setCategory(.playback, mode: .default)
     }
 
     /// Tears down and restarts capture (fresh tap, current input format).

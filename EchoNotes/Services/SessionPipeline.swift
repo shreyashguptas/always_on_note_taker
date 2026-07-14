@@ -17,21 +17,24 @@ final class SessionPipeline {
     }
 
     enum Event {
-        /// Throttled mic level for the waveform, plus whether speech is active.
-        case level(Float, isSpeech: Bool)
+        /// Mic level for the waveform (~12 Hz, one per tap buffer).
+        case level(Float)
         case sessionStarted(id: UUID, fileName: String, startedAt: Date)
         case sessionEnded(id: UUID, fileName: String, duration: TimeInterval, endedAt: Date, reason: EndReason, discarded: Bool)
     }
 
     /// Delivered on the main queue.
     var emit: ((Event) -> Void)?
-    /// Called synchronously on the pipeline queue when a session begins, with
-    /// every buffer that belongs to the session (pre-roll included) — this is
-    /// the transcription feed. Returns nothing; the coordinator wires it.
+    /// Called synchronously on the pipeline queue with every buffer belonging
+    /// to a session (pre-roll included) — the transcription feed.
     var speechSink: ((UUID, AVAudioPCMBuffer) -> Void)?
 
     private let queue = DispatchQueue(label: "echonotes.pipeline", qos: .userInitiated)
     private let vad = VoiceActivityDetector()
+
+    /// Gate closed by stop(): buffers that race in while a stop is settling
+    /// (the tap is torn down asynchronously) must not start a new session.
+    private var accepting = false
 
     // Pre-roll kept while waiting for speech.
     private var preRoll: [AVAudioPCMBuffer] = []
@@ -50,19 +53,34 @@ final class SessionPipeline {
 
     private var active: ActiveSession?
 
+    // MARK: - Gate
+
+    /// Opens the pipeline for new sessions. Called after capture (re)starts.
+    func beginAccepting() {
+        queue.async { [self] in
+            accepting = true
+        }
+    }
+
     // MARK: - Ingest (called from the audio tap)
 
     func ingest(_ buffer: AVAudioPCMBuffer) {
+        // The tap's buffer is only guaranteed valid inside the tap callback;
+        // everything downstream holds buffers (pre-roll, transcription hold),
+        // so copy before leaving this thread.
+        guard let copy = buffer.deepCopy() else { return }
         queue.async { [self] in
-            process(buffer)
+            process(copy)
         }
     }
 
     private func process(_ buffer: AVAudioPCMBuffer) {
+        guard accepting else { return }
+
         let reading = vad.process(buffer)
         let bufferSeconds = Double(buffer.frameLength) / buffer.format.sampleRate
 
-        dispatchToMain(.level(reading.normalizedLevel, isSpeech: reading.isSpeech))
+        dispatchToMain(.level(reading.normalizedLevel))
 
         if var session = active {
             session.clock += bufferSeconds
@@ -134,7 +152,7 @@ final class SessionPipeline {
             : session.clock
 
         let emitEvent = emit
-        session.writer.finish { _ in
+        session.writer.finish {
             DispatchQueue.main.async {
                 emitEvent?(.sessionEnded(
                     id: session.id,
@@ -148,10 +166,12 @@ final class SessionPipeline {
         }
     }
 
-    /// Finalize any active session (toggle off, interruption). The completion
-    /// runs on the pipeline queue after state is settled.
+    /// Finalize any active session (toggle off, interruption) and close the
+    /// gate so racing buffers can't start a new one. The completion runs on
+    /// the main queue after pipeline state is settled.
     func stop(reason: EndReason, completion: (() -> Void)? = nil) {
         queue.async { [self] in
+            accepting = false
             endActiveSession(reason: reason)
             preRoll.removeAll()
             preRollSeconds = 0

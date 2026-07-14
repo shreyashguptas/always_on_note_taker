@@ -33,4 +33,13 @@ enum AppSettings {
     /// Transcript chunk size (in characters) fed to one Foundation Models
     /// request. Conservative to stay well inside the ~4K-token context.
     static let summarizationChunkCharacters = 9_000
+
+    /// Audio held while the speech analyzer starts up; oldest drops first.
+    static let transcriptionHoldSeconds: TimeInterval = 60
+
+    /// Denormalized transcript preview stored on the session for cheap search.
+    static let transcriptPreviewLength = 500
+
+    /// Bars in the live waveform (also the size of the rolling levels buffer).
+    static let waveformBarCount = 60
 }

@@ -40,7 +40,7 @@ struct SummarySectionView: View {
                 if !note.keyPoints.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
                         sectionHeader("Key points", systemImage: "list.bullet")
-                        ForEach(note.keyPoints, id: \.self) { point in
+                        ForEach(Array(note.keyPoints.enumerated()), id: \.offset) { _, point in
                             HStack(alignment: .firstTextBaseline, spacing: 8) {
                                 Circle()
                                     .fill(Color.accentColor)
@@ -55,7 +55,7 @@ struct SummarySectionView: View {
                 if !note.actionItems.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
                         sectionHeader("Action items", systemImage: "checkmark.circle")
-                        ForEach(note.actionItems, id: \.self) { item in
+                        ForEach(Array(note.actionItems.enumerated()), id: \.offset) { _, item in
                             HStack(alignment: .firstTextBaseline, spacing: 8) {
                                 Image(systemName: "circle")
                                     .font(.subheadline)

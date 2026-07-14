@@ -7,13 +7,10 @@ final class AudioFileWriter {
     let url: URL
     private let queue = DispatchQueue(label: "echonotes.audiofile", qos: .userInitiated)
     private var file: AVAudioFile?
-    private var converter: AVAudioConverter?
-    private var framesWritten: AVAudioFramePosition = 0
-    private let sampleRate: Double
+    private var converter: AudioBufferConverter?
 
     init(url: URL, inputFormat: AVAudioFormat) throws {
         self.url = url
-        self.sampleRate = inputFormat.sampleRate
 
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
@@ -21,58 +18,26 @@ final class AudioFileWriter {
             AVNumberOfChannelsKey: Int(inputFormat.channelCount),
             AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
         ]
-        self.file = try AVAudioFile(forWriting: url, settings: settings)
+        let file = try AVAudioFile(forWriting: url, settings: settings)
+        self.file = file
+        self.converter = AudioBufferConverter(outputFormat: file.processingFormat)
     }
 
     func write(_ buffer: AVAudioPCMBuffer) {
         queue.async { [self] in
-            guard let file else { return }
-            do {
-                if buffer.format == file.processingFormat {
-                    try file.write(from: buffer)
-                } else {
-                    try writeConverted(buffer, to: file)
-                }
-                framesWritten += AVAudioFramePosition(buffer.frameLength)
-            } catch {
-                // Dropping a buffer is preferable to crashing the pipeline;
-                // the transcript is unaffected.
-            }
+            guard let file, let converted = converter?.convert(buffer) else { return }
+            // Dropping a buffer is preferable to crashing the pipeline; the
+            // transcript is unaffected.
+            try? file.write(from: converted)
         }
     }
 
-    private func writeConverted(_ buffer: AVAudioPCMBuffer, to file: AVAudioFile) throws {
-        if converter == nil {
-            converter = AVAudioConverter(from: buffer.format, to: file.processingFormat)
-        }
-        guard let converter else { return }
-        let ratio = file.processingFormat.sampleRate / buffer.format.sampleRate
-        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 64
-        guard let converted = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: capacity) else { return }
-
-        var consumed = false
-        var conversionError: NSError?
-        converter.convert(to: converted, error: &conversionError) { _, outStatus in
-            if consumed {
-                outStatus.pointee = .noDataNow
-                return nil
-            }
-            consumed = true
-            outStatus.pointee = .haveData
-            return buffer
-        }
-        if conversionError == nil, converted.frameLength > 0 {
-            try file.write(from: converted)
-        }
-    }
-
-    /// Flushes pending writes and closes the file. Returns the written
-    /// duration in seconds. Safe to call once.
-    func finish(completion: @escaping (TimeInterval) -> Void) {
+    /// Flushes pending writes and closes the file. Safe to call once.
+    func finish(completion: @escaping () -> Void) {
         queue.async { [self] in
-            let duration = TimeInterval(framesWritten) / sampleRate
             file = nil // AVAudioFile closes on deinit
-            completion(duration)
+            converter = nil
+            completion()
         }
     }
 }

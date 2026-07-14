@@ -12,7 +12,7 @@ final class TranscriptionRegistry {
     private var services: [UUID: TranscriptionService] = [:]
     private var locale: Locale = .current
     /// Configures callbacks on a freshly created service. Set once by the
-    /// coordinator; invoked on the pipeline queue.
+    /// coordinator before capture ever starts; invoked on the pipeline queue.
     var configure: ((UUID, TranscriptionService) -> Void)?
 
     func setLocale(_ locale: Locale) {
@@ -41,14 +41,6 @@ final class TranscriptionRegistry {
         defer { lock.unlock() }
         return services.removeValue(forKey: id)
     }
-
-    func removeAll() -> [TranscriptionService] {
-        lock.lock()
-        defer { lock.unlock() }
-        let all = Array(services.values)
-        services.removeAll()
-        return all
-    }
 }
 
 /// The app's engine room: owns the capture service, the session pipeline, and
@@ -76,9 +68,10 @@ final class RecordingCoordinator {
     private(set) var isEnabled = false
     private(set) var micPermissionDenied = false
     /// Rolling mic levels (0...1) for the waveform, newest last.
-    private(set) var levels: [Float] = Array(repeating: 0, count: 60)
-    private(set) var speechActive = false
+    private(set) var levels: [Float] = Array(repeating: 0, count: AppSettings.waveformBarCount)
     private(set) var currentSessionStartedAt: Date?
+    /// Why AI summaries are degraded right now, if they are (checked at enable).
+    private(set) var aiUnavailabilityMessage: String?
 
     /// Live transcript of the in-flight session.
     private(set) var liveFinalizedText = ""
@@ -92,6 +85,12 @@ final class RecordingCoordinator {
     private let modelContext: ModelContext
     private var resumeTask: Task<Void, Never>?
     private var activeSessionID: UUID?
+    /// Monotonic per-session segment index; avoids faulting the whole
+    /// segments relationship just to count it on every append.
+    private var nextSegmentIndex = 0
+    private var lastSegmentSave = Date.distantPast
+    /// The waveform only needs updates while the Record tab is visible.
+    private var levelUpdatesWanted = true
 
     init(modelContext: ModelContext) {
         self.modelContext = modelContext
@@ -117,6 +116,8 @@ final class RecordingCoordinator {
             }
         }
 
+        // Main-actor ordering guarantees this runs before any user-initiated
+        // enable() can create a live session.
         Task { [weak self] in
             self?.recoverInterruptedSessions()
         }
@@ -134,32 +135,42 @@ final class RecordingCoordinator {
     }
 
     private func enable() async {
+        // Flip immediately so a second tap during the (potentially long)
+        // startup reads as "turn off" instead of spawning a parallel enable.
+        isEnabled = true
         state = .starting
         micPermissionDenied = false
 
         guard await AudioCaptureService.requestMicrophonePermission() else {
             micPermissionDenied = true
+            isEnabled = false
             state = .off
             return
         }
+        guard isEnabled else { return } // toggled off while the dialog was up
 
         await speechModel.ensureModelInstalled()
+        guard isEnabled else { return } // toggled off during the download
+
         switch speechModel.state {
         case .ready:
             break
         case .unsupportedLocale:
+            isEnabled = false
             state = .error("On-device transcription isn't available for your language yet.")
             return
         case .failed(let message):
+            isEnabled = false
             state = .error(message)
             return
         default:
+            isEnabled = false
             state = .error("The speech model isn't ready yet. Try again in a moment.")
             return
         }
         transcriptions.setLocale(speechModel.locale)
+        aiUnavailabilityMessage = SummarizationService.unavailabilityMessage
 
-        isEnabled = true
         startCaptureOrRetry()
     }
 
@@ -168,22 +179,33 @@ final class RecordingCoordinator {
         resumeTask?.cancel()
         resumeTask = nil
         currentSessionStartedAt = nil
+        liveFinalizedText = ""
+        liveVolatileText = ""
         pipeline.stop(reason: .manualStop) { [weak self] in
             self?.capture.stop()
         }
         state = .off
-        speechActive = false
         levels = Array(repeating: 0, count: levels.count)
     }
 
     // MARK: - Capture lifecycle
 
-    private func startCaptureOrRetry() {
-        guard isEnabled else { return }
+    /// Starts (or restarts) capture and opens the pipeline gate. Returns
+    /// whether capture is running.
+    private func restartCapture() -> Bool {
         do {
             try capture.restart()
+            pipeline.beginAccepting()
             state = currentSessionStartedAt == nil ? .listening : .recording
+            return true
         } catch {
+            return false
+        }
+    }
+
+    private func startCaptureOrRetry() {
+        guard isEnabled else { return }
+        if !restartCapture() {
             state = .interrupted
             scheduleResumeAttempts()
         }
@@ -197,13 +219,8 @@ final class RecordingCoordinator {
             defer { self?.resumeTask = nil }
             while let self, self.isEnabled, !self.capture.isRunning {
                 if Task.isCancelled { return }
-                do {
-                    try self.capture.restart()
-                    self.state = self.currentSessionStartedAt == nil ? .listening : .recording
-                    return
-                } catch {
-                    try? await Task.sleep(for: .seconds(3))
-                }
+                if self.restartCapture() { return }
+                try? await Task.sleep(for: .seconds(3))
             }
         }
     }
@@ -223,7 +240,7 @@ final class RecordingCoordinator {
 
         case .configurationChanged:
             // Input hardware changed (headset in/out…). Restart capture; the
-            // active session continues — writers convert across formats.
+            // active session continues — converters handle the new format.
             startCaptureOrRetry()
 
         case .mediaServicesReset:
@@ -231,6 +248,7 @@ final class RecordingCoordinator {
             currentSessionStartedAt = nil
             do {
                 try capture.rebuildAfterMediaServicesReset()
+                pipeline.beginAccepting()
                 state = .listening
             } catch {
                 state = .interrupted
@@ -241,12 +259,19 @@ final class RecordingCoordinator {
 
     // MARK: - Pipeline events
 
+    /// The Record tab calls this so waveform updates stop costing anything
+    /// while the tab isn't visible.
+    func setLevelUpdatesWanted(_ wanted: Bool) {
+        levelUpdatesWanted = wanted
+    }
+
     private func handlePipelineEvent(_ event: SessionPipeline.Event) {
         switch event {
-        case .level(let level, let isSpeech):
-            levels.removeFirst()
-            levels.append(level)
-            speechActive = isSpeech
+        case .level(let level):
+            if levelUpdatesWanted {
+                levels.removeFirst()
+                levels.append(level)
+            }
 
         case .sessionStarted(let id, let fileName, let startedAt):
             let session = RecordingSession(id: id, startedAt: startedAt)
@@ -255,6 +280,7 @@ final class RecordingCoordinator {
             modelContext.insert(session)
             try? modelContext.save()
             activeSessionID = id
+            nextSegmentIndex = 0
             currentSessionStartedAt = startedAt
             liveFinalizedText = ""
             liveVolatileText = ""
@@ -264,25 +290,30 @@ final class RecordingCoordinator {
             if activeSessionID == id {
                 activeSessionID = nil
                 currentSessionStartedAt = nil
+                liveFinalizedText = ""
                 liveVolatileText = ""
+                // Only the *active* session's end returns the UI to listening;
+                // a late event from an interrupted session must not clobber a
+                // newer session's state.
+                if isEnabled, state == .recording { state = .listening }
             }
-            if isEnabled, state == .recording { state = .listening }
 
             let service = transcriptions.remove(id: id)
+            let session = fetchSession(id: id)
 
-            guard let session = fetchSession(id: id), !discarded else {
+            if discarded || session == nil {
                 service?.cancel()
                 Persistence.deleteAudioFile(named: fileName)
-                if let session = fetchSession(id: id) {
+                if let session {
                     modelContext.delete(session)
                     try? modelContext.save()
                 }
                 return
             }
 
-            session.endedAt = endedAt
-            session.duration = duration
-            session.status = .transcribing
+            session?.endedAt = endedAt
+            session?.duration = duration
+            session?.status = .transcribing
             try? modelContext.save()
 
             Task { [weak self] in
@@ -358,7 +389,7 @@ final class RecordingCoordinator {
         })
         guard let orphans = try? modelContext.fetch(descriptor), !orphans.isEmpty else { return }
 
-        for session in orphans {
+        for session in orphans where session.id != activeSessionID {
             let segments = session.sortedSegments
             if segments.isEmpty {
                 Persistence.deleteAudioFile(named: session.audioFileName)
@@ -384,23 +415,34 @@ final class RecordingCoordinator {
 
     private func appendSegment(_ segment: TranscriptionService.Segment, to id: UUID) {
         guard let session = fetchSession(id: id) else { return }
+        let isActive = id == activeSessionID
+
         let stored = TranscriptSegment(
-            index: session.segments.count,
+            index: isActive ? nextSegmentIndex : session.segments.count,
             text: segment.text,
             startTime: segment.startTime,
             endTime: segment.endTime
         )
+        if isActive { nextSegmentIndex += 1 }
         modelContext.insert(stored)
         stored.session = session
-        if session.transcriptPreview.count < 500 {
+
+        if session.transcriptPreview.count < AppSettings.transcriptPreviewLength {
             let combined = session.transcriptPreview.isEmpty
                 ? segment.text
                 : session.transcriptPreview + " " + segment.text
-            session.transcriptPreview = String(combined.prefix(500))
+            session.transcriptPreview = String(combined.prefix(AppSettings.transcriptPreviewLength))
         }
-        try? modelContext.save()
 
-        if id == activeSessionID {
+        // Persist at most every few seconds — enough for crash recovery
+        // without a disk commit per spoken sentence. (Session end always
+        // saves explicitly.)
+        if Date.now.timeIntervalSince(lastSegmentSave) > 3 {
+            try? modelContext.save()
+            lastSegmentSave = .now
+        }
+
+        if isActive {
             liveFinalizedText = liveFinalizedText.isEmpty
                 ? segment.text
                 : liveFinalizedText + " " + segment.text

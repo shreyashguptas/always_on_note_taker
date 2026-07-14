@@ -34,10 +34,9 @@ final class TranscriptionService {
     // Guarded by `lock`: buffering until the analyzer is ready, plus the
     // converter that resamples tap audio into the analyzer's format.
     private let lock = NSLock()
-    private var analyzerFormat: AVAudioFormat?
-    private var converter: AVAudioConverter?
-    private var converterInputFormat: AVAudioFormat?
+    private var converter: AudioBufferConverter?
     private var pendingBuffers: [AVAudioPCMBuffer] = []
+    private var pendingSeconds: TimeInterval = 0
     private var finished = false
     /// Fallback clock (seconds fed to the analyzer) used when a result carries
     /// no audio time range.
@@ -83,6 +82,7 @@ final class TranscriptionService {
         } catch {
             lock.lock()
             pendingBuffers.removeAll()
+            pendingSeconds = 0
             finished = true
             lock.unlock()
             return
@@ -90,9 +90,12 @@ final class TranscriptionService {
 
         // Analyzer is live: flush everything buffered while it started.
         lock.lock()
-        analyzerFormat = format
+        if let format {
+            converter = AudioBufferConverter(outputFormat: format)
+        }
         let held = pendingBuffers
         pendingBuffers.removeAll()
+        pendingSeconds = 0
         lock.unlock()
 
         for buffer in held {
@@ -108,13 +111,15 @@ final class TranscriptionService {
             lock.unlock()
             return
         }
-        if analyzerFormat == nil {
-            // Cap the holding buffer at roughly 60 seconds of audio in case
-            // startup stalls; oldest audio drops first.
-            if pendingBuffers.count > 700 {
-                pendingBuffers.removeFirst()
-            }
+        if converter == nil {
+            // Hold audio while the analyzer starts, bounded in case startup
+            // stalls; oldest audio drops first.
             pendingBuffers.append(buffer)
+            pendingSeconds += Double(buffer.frameLength) / buffer.format.sampleRate
+            while pendingSeconds > AppSettings.transcriptionHoldSeconds, !pendingBuffers.isEmpty {
+                let removed = pendingBuffers.removeFirst()
+                pendingSeconds -= Double(removed.frameLength) / removed.format.sampleRate
+            }
             lock.unlock()
             return
         }
@@ -124,52 +129,11 @@ final class TranscriptionService {
 
     private func convertAndYield(_ buffer: AVAudioPCMBuffer) {
         lock.lock()
-        guard !finished, let format = analyzerFormat else {
+        guard !finished, let converter, let converted = converter.convert(buffer) else {
             lock.unlock()
             return
         }
-
-        if buffer.format == format {
-            fedSeconds += Double(buffer.frameLength) / buffer.format.sampleRate
-            lock.unlock()
-            inputBuilder.yield(AnalyzerInput(buffer: buffer))
-            return
-        }
-
-        // Rebuild the converter if the input format changed (route change).
-        if converter == nil || converterInputFormat != buffer.format {
-            converter = AVAudioConverter(from: buffer.format, to: format)
-            converterInputFormat = buffer.format
-        }
-        guard let converter else {
-            lock.unlock()
-            return
-        }
-
-        let ratio = format.sampleRate / buffer.format.sampleRate
-        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 64
-        guard let converted = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else {
-            lock.unlock()
-            return
-        }
-
-        var consumed = false
-        var conversionError: NSError?
-        converter.convert(to: converted, error: &conversionError) { _, outStatus in
-            if consumed {
-                outStatus.pointee = .noDataNow
-                return nil
-            }
-            consumed = true
-            outStatus.pointee = .haveData
-            return buffer
-        }
-
-        guard conversionError == nil, converted.frameLength > 0 else {
-            lock.unlock()
-            return
-        }
-        fedSeconds += Double(converted.frameLength) / format.sampleRate
+        fedSeconds += Double(converted.frameLength) / converted.format.sampleRate
         lock.unlock()
         inputBuilder.yield(AnalyzerInput(buffer: converted))
     }
@@ -225,12 +189,7 @@ final class TranscriptionService {
     /// Stops accepting audio, asks the analyzer to finalize everything it has
     /// heard, and waits until the last segment has been delivered.
     func finishAndWait() async {
-        lock.lock()
-        let alreadyFinished = finished
-        finished = true
-        pendingBuffers.removeAll()
-        lock.unlock()
-        guard !alreadyFinished else { return }
+        guard markFinished() else { return }
 
         // Make sure startup completed before finalizing.
         await startTask?.value
@@ -241,16 +200,26 @@ final class TranscriptionService {
         await resultsTask?.value
     }
 
-    /// Abandon without finalizing (discarded sessions).
+    /// Abandon without finalizing (discarded sessions). Waits for startup so
+    /// the analyzer that startup creates is always the one torn down.
     func cancel() {
-        lock.lock()
-        finished = true
-        pendingBuffers.removeAll()
-        lock.unlock()
-        inputBuilder.finish()
-        resultsTask?.cancel()
-        Task { [analyzer] in
+        guard markFinished() else { return }
+        Task { [self] in
+            await startTask?.value
+            inputBuilder.finish()
+            resultsTask?.cancel()
             await analyzer?.cancelAndFinishNow()
         }
+    }
+
+    /// Returns false if already finished.
+    private func markFinished() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if finished { return false }
+        finished = true
+        pendingBuffers.removeAll()
+        pendingSeconds = 0
+        return true
     }
 }

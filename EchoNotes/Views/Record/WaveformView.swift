@@ -23,7 +23,6 @@ struct WaveformView: View {
                 context.fill(path, with: .color(barColor.opacity(active ? opacity : 0.25)))
             }
         }
-        .animation(.linear(duration: 0.08), value: levels)
         .accessibilityHidden(true)
     }
 

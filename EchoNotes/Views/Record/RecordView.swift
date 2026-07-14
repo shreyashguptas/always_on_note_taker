@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RecordView: View {
     @Environment(RecordingCoordinator.self) private var coordinator
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationStack {
@@ -44,6 +45,13 @@ struct RecordView: View {
             }
             .navigationTitle("EchoNotes")
             .navigationBarTitleDisplayMode(.inline)
+            // Waveform updates are pure UI; don't pay for them when the tab
+            // isn't visible or the app is in the background.
+            .onAppear { coordinator.setLevelUpdatesWanted(scenePhase == .active) }
+            .onDisappear { coordinator.setLevelUpdatesWanted(false) }
+            .onChange(of: scenePhase) { _, phase in
+                coordinator.setLevelUpdatesWanted(phase == .active)
+            }
         }
     }
 
@@ -144,7 +152,7 @@ struct RecordView: View {
             EmptyView()
         }
 
-        if coordinator.isEnabled, let message = SummarizationService.unavailabilityMessage {
+        if coordinator.isEnabled, let message = coordinator.aiUnavailabilityMessage {
             StatusBanner(kind: .info, message: message)
         }
     }
