@@ -4,7 +4,7 @@ struct RootTabView: View {
     var body: some View {
         TabView {
             Tab("Record", systemImage: "waveform.circle.fill") {
-                Text("Record")
+                RecordView()
             }
 
             Tab("Notes", systemImage: "note.text") {
