@@ -55,4 +55,5 @@ struct AudioSectionView: View {
         NoteDetailView(session: try! PreviewData.container.mainContext.fetch(FetchDescriptor<RecordingSession>()).first!)
     }
     .modelContainer(PreviewData.container)
+    .environment(RecordingCoordinator(modelContext: PreviewData.container.mainContext))
 }

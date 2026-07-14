@@ -116,6 +116,10 @@ final class RecordingCoordinator {
                 self?.appendSegment(segment, to: id)
             }
         }
+
+        Task { [weak self] in
+            self?.recoverInterruptedSessions()
+        }
     }
 
     // MARK: - Toggle
@@ -297,7 +301,77 @@ final class RecordingCoordinator {
             try? modelContext.save()
             return
         }
+        summarize(session)
+    }
+
+    // MARK: - Note generation
+
+    private func summarize(_ session: RecordingSession) {
+        session.status = .summarizing
+        try? modelContext.save()
+
+        let id = session.id
+        let transcript = session.fullTranscript
+        Task { [weak self] in
+            let result = await SummarizationService.generateNote(from: transcript)
+            self?.attachNote(result, to: id)
+        }
+    }
+
+    private func attachNote(_ result: SummarizationService.NoteResult, to id: UUID) {
+        guard let session = fetchSession(id: id) else { return }
+        if let old = session.note {
+            modelContext.delete(old)
+        }
+        let note = GeneratedNote(
+            title: result.title,
+            overview: result.overview,
+            keyPoints: result.keyPoints,
+            actionItems: result.actionItems,
+            tags: result.tags,
+            generatorUsed: result.generator
+        )
+        modelContext.insert(note)
+        session.note = note
         session.status = .complete
+        try? modelContext.save()
+    }
+
+    /// Re-runs note generation for an existing session (e.g. after enabling
+    /// Apple Intelligence, or if the first result was weak).
+    func regenerateNote(for session: RecordingSession) {
+        guard !session.segments.isEmpty, session.status == .complete || session.status == .failed else { return }
+        summarize(session)
+    }
+
+    // MARK: - Launch recovery
+
+    /// Sessions left mid-flight by a crash, force-quit, or kill are recovered:
+    /// their incrementally persisted segments become the transcript, and note
+    /// generation is re-run. Empty leftovers are removed.
+    func recoverInterruptedSessions() {
+        let recording = RecordingSession.Status.recording.rawValue
+        let transcribing = RecordingSession.Status.transcribing.rawValue
+        let summarizing = RecordingSession.Status.summarizing.rawValue
+        let descriptor = FetchDescriptor<RecordingSession>(predicate: #Predicate {
+            $0.statusRaw == recording || $0.statusRaw == transcribing || $0.statusRaw == summarizing
+        })
+        guard let orphans = try? modelContext.fetch(descriptor), !orphans.isEmpty else { return }
+
+        for session in orphans {
+            let segments = session.sortedSegments
+            if segments.isEmpty {
+                Persistence.deleteAudioFile(named: session.audioFileName)
+                modelContext.delete(session)
+                continue
+            }
+            let lastEnd = segments.last?.endTime ?? 0
+            if session.duration == 0 { session.duration = lastEnd }
+            if session.endedAt == nil {
+                session.endedAt = session.startedAt.addingTimeInterval(lastEnd)
+            }
+            summarize(session)
+        }
         try? modelContext.save()
     }
 

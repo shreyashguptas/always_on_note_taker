@@ -143,5 +143,9 @@ struct RecordView: View {
         case .unknown, .ready:
             EmptyView()
         }
+
+        if coordinator.isEnabled, let message = SummarizationService.unavailabilityMessage {
+            StatusBanner(kind: .info, message: message)
+        }
     }
 }

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SummarySectionView: View {
     let session: RecordingSession
+    @Environment(RecordingCoordinator.self) private var coordinator
 
     var body: some View {
         if let note = session.note {
@@ -66,6 +67,14 @@ struct SummarySectionView: View {
                 }
 
                 generatorFooter(note)
+
+                Button {
+                    coordinator.regenerateNote(for: session)
+                } label: {
+                    Label("Regenerate summary", systemImage: "arrow.clockwise.circle")
+                }
+                .buttonStyle(.bordered)
+                .disabled(session.isProcessing)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
