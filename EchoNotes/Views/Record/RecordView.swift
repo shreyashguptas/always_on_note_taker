@@ -27,6 +27,16 @@ struct RecordView: View {
 
                 Spacer()
 
+                if coordinator.state == .recording || !coordinator.liveFinalizedText.isEmpty {
+                    LiveTranscriptView(
+                        finalizedText: coordinator.liveFinalizedText,
+                        volatileText: coordinator.liveVolatileText
+                    )
+                    .frame(maxHeight: 180)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
+                }
+
                 WaveformView(levels: coordinator.levels, active: coordinator.isEnabled)
                     .frame(height: 64)
                     .padding(.horizontal, 24)
@@ -119,6 +129,19 @@ struct RecordView: View {
                     UIApplication.shared.open(url)
                 }
             }
+        }
+
+        switch coordinator.speechModel.state {
+        case .checking:
+            StatusBanner(kind: .progress(nil), message: "Checking the on-device speech model…")
+        case .downloading(let fraction):
+            StatusBanner(kind: .progress(fraction), message: "Downloading the on-device speech model…")
+        case .failed(let message):
+            StatusBanner(kind: .warning, message: message)
+        case .unsupportedLocale:
+            StatusBanner(kind: .warning, message: "On-device transcription isn't available for your language yet.")
+        case .unknown, .ready:
+            EmptyView()
         }
     }
 }

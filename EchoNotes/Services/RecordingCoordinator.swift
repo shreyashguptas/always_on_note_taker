@@ -3,9 +3,58 @@ import Foundation
 import Observation
 import SwiftData
 
-/// The app's engine room: owns the capture service and the session pipeline,
-/// reacts to interruptions, and persists sessions to SwiftData. Lives on the
-/// main actor; audio-thread work stays inside the services it owns.
+/// Thread-safe map of session id → live transcription service. Buffers arrive
+/// on the pipeline queue; the coordinator manages lifecycles on the main
+/// actor. Services are created lazily on the first buffer of a session so the
+/// pre-roll is never missed.
+final class TranscriptionRegistry {
+    private let lock = NSLock()
+    private var services: [UUID: TranscriptionService] = [:]
+    private var locale: Locale = .current
+    /// Configures callbacks on a freshly created service. Set once by the
+    /// coordinator; invoked on the pipeline queue.
+    var configure: ((UUID, TranscriptionService) -> Void)?
+
+    func setLocale(_ locale: Locale) {
+        lock.lock()
+        self.locale = locale
+        lock.unlock()
+    }
+
+    func feed(id: UUID, buffer: AVAudioPCMBuffer) {
+        lock.lock()
+        var service = services[id]
+        if service == nil {
+            let created = TranscriptionService(locale: locale)
+            services[id] = created
+            service = created
+            lock.unlock()
+            configure?(id, created)
+        } else {
+            lock.unlock()
+        }
+        service?.enqueue(buffer)
+    }
+
+    func remove(id: UUID) -> TranscriptionService? {
+        lock.lock()
+        defer { lock.unlock() }
+        return services.removeValue(forKey: id)
+    }
+
+    func removeAll() -> [TranscriptionService] {
+        lock.lock()
+        defer { lock.unlock() }
+        let all = Array(services.values)
+        services.removeAll()
+        return all
+    }
+}
+
+/// The app's engine room: owns the capture service, the session pipeline, and
+/// per-session transcription, reacts to interruptions, and persists sessions
+/// to SwiftData. Lives on the main actor; audio-thread work stays inside the
+/// services it owns.
 @MainActor
 @Observable
 final class RecordingCoordinator {
@@ -31,10 +80,18 @@ final class RecordingCoordinator {
     private(set) var speechActive = false
     private(set) var currentSessionStartedAt: Date?
 
+    /// Live transcript of the in-flight session.
+    private(set) var liveFinalizedText = ""
+    private(set) var liveVolatileText = ""
+
+    let speechModel = SpeechModelManager()
+
     private let capture = AudioCaptureService()
     private let pipeline = SessionPipeline()
+    private let transcriptions = TranscriptionRegistry()
     private let modelContext: ModelContext
     private var resumeTask: Task<Void, Never>?
+    private var activeSessionID: UUID?
 
     init(modelContext: ModelContext) {
         self.modelContext = modelContext
@@ -47,6 +104,17 @@ final class RecordingCoordinator {
         }
         pipeline.emit = { [weak self] event in
             self?.handlePipelineEvent(event)
+        }
+        pipeline.speechSink = { [transcriptions] id, buffer in
+            transcriptions.feed(id: id, buffer: buffer)
+        }
+        transcriptions.configure = { [weak self] id, service in
+            service.onVolatileText = { text in
+                self?.updateVolatileText(text, for: id)
+            }
+            service.onFinalSegment = { segment in
+                self?.appendSegment(segment, to: id)
+            }
         }
     }
 
@@ -70,6 +138,22 @@ final class RecordingCoordinator {
             state = .off
             return
         }
+
+        await speechModel.ensureModelInstalled()
+        switch speechModel.state {
+        case .ready:
+            break
+        case .unsupportedLocale:
+            state = .error("On-device transcription isn't available for your language yet.")
+            return
+        case .failed(let message):
+            state = .error(message)
+            return
+        default:
+            state = .error("The speech model isn't ready yet. Try again in a moment.")
+            return
+        }
+        transcriptions.setLocale(speechModel.locale)
 
         isEnabled = true
         startCaptureOrRetry()
@@ -166,26 +250,86 @@ final class RecordingCoordinator {
             session.status = .recording
             modelContext.insert(session)
             try? modelContext.save()
+            activeSessionID = id
             currentSessionStartedAt = startedAt
+            liveFinalizedText = ""
+            liveVolatileText = ""
             if isEnabled { state = .recording }
 
         case .sessionEnded(let id, let fileName, let duration, let endedAt, _, let discarded):
-            currentSessionStartedAt = nil
+            if activeSessionID == id {
+                activeSessionID = nil
+                currentSessionStartedAt = nil
+                liveVolatileText = ""
+            }
             if isEnabled, state == .recording { state = .listening }
-            guard let session = fetchSession(id: id) else {
-                if discarded { Persistence.deleteAudioFile(named: fileName) }
-                return
-            }
-            if discarded {
+
+            let service = transcriptions.remove(id: id)
+
+            guard let session = fetchSession(id: id), !discarded else {
+                service?.cancel()
                 Persistence.deleteAudioFile(named: fileName)
-                modelContext.delete(session)
-                try? modelContext.save()
+                if let session = fetchSession(id: id) {
+                    modelContext.delete(session)
+                    try? modelContext.save()
+                }
                 return
             }
+
             session.endedAt = endedAt
             session.duration = duration
+            session.status = .transcribing
+            try? modelContext.save()
+
+            Task { [weak self] in
+                await service?.finishAndWait()
+                self?.finalizeSession(id: id)
+            }
+        }
+    }
+
+    /// Called after the last transcript segment has been persisted.
+    private func finalizeSession(id: UUID) {
+        guard let session = fetchSession(id: id) else { return }
+        if session.segments.isEmpty {
+            // Nothing intelligible was said; keep the recording but mark it done.
             session.status = .complete
             try? modelContext.save()
+            return
+        }
+        session.status = .complete
+        try? modelContext.save()
+    }
+
+    // MARK: - Transcription callbacks (main queue)
+
+    private func updateVolatileText(_ text: String, for id: UUID) {
+        guard id == activeSessionID else { return }
+        liveVolatileText = text
+    }
+
+    private func appendSegment(_ segment: TranscriptionService.Segment, to id: UUID) {
+        guard let session = fetchSession(id: id) else { return }
+        let stored = TranscriptSegment(
+            index: session.segments.count,
+            text: segment.text,
+            startTime: segment.startTime,
+            endTime: segment.endTime
+        )
+        modelContext.insert(stored)
+        stored.session = session
+        if session.transcriptPreview.count < 500 {
+            let combined = session.transcriptPreview.isEmpty
+                ? segment.text
+                : session.transcriptPreview + " " + segment.text
+            session.transcriptPreview = String(combined.prefix(500))
+        }
+        try? modelContext.save()
+
+        if id == activeSessionID {
+            liveFinalizedText = liveFinalizedText.isEmpty
+                ? segment.text
+                : liveFinalizedText + " " + segment.text
         }
     }
 
