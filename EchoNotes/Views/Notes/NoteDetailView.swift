@@ -12,6 +12,7 @@ struct NoteDetailView: View {
     }
 
     @State private var section: Section = .summary
+    @State private var playback = AudioPlaybackService()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -28,25 +29,25 @@ struct NoteDetailView: View {
             case .summary:
                 SummarySectionView(session: session)
             case .transcript:
-                TranscriptSectionView(session: session)
+                TranscriptSectionView(session: session, seek: seekFromTranscript)
             case .audio:
-                AudioSectionView(session: session)
+                AudioPlayerView(session: session, playback: playback)
             }
         }
         .navigationTitle(session.displayTitle)
         .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-/// Placeholder until playback lands; shows recording metadata.
-struct AudioSectionView: View {
-    let session: RecordingSession
-
-    var body: some View {
-        List {
-            LabeledContent("Recorded", value: session.startedAt.formatted(date: .abbreviated, time: .shortened))
-            LabeledContent("Duration", value: TimeFormatting.clock(session.duration))
+        .onDisappear {
+            playback.stop()
         }
+    }
+
+    /// Tapping a transcript timestamp starts playback at that moment.
+    private func seekFromTranscript(_ time: TimeInterval) {
+        if !playback.isLoaded, let fileName = session.audioFileName {
+            playback.load(url: Persistence.audioURL(forFileName: fileName))
+        }
+        guard playback.isLoaded else { return }
+        playback.playFrom(time)
     }
 }
 
