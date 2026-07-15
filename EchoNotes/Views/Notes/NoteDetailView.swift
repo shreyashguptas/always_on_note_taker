@@ -52,14 +52,19 @@ struct NoteDetailView: View {
         }
     }
 
-    /// Offer a re-run when the multilingual/speaker pass failed, or never
-    /// ran but its models have since been downloaded.
+    /// Offer a re-run when the multilingual/speaker pass failed or never
+    /// ran — but only when it can actually run now (models installed, audio
+    /// still on disk), so the button never silently does nothing.
     private var showsRetry: Bool {
         guard session.status == .complete || session.status == .failed else { return false }
         switch session.enrichmentState {
-        case .failed: return true
-        case .skipped, .none: return coordinator.enrichmentModels.isReady && session.audioFileURL != nil
-        case .pending, .done: return false
+        case .failed, .skipped, .none:
+            guard coordinator.enrichmentModels.isReady,
+                  let url = session.audioFileURL,
+                  FileManager.default.fileExists(atPath: url.path) else { return false }
+            return true
+        case .pending, .done:
+            return false
         }
     }
 

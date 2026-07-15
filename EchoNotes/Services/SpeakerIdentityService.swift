@@ -19,7 +19,10 @@ final class SpeakerIdentityService {
     /// Auto-tags confident matches, queues the rest for review.
     func processClusters(_ clusters: [TranscriptEnrichmentService.SpeakerCluster], sessionID: UUID) {
         let speakers = allSpeakers()
-        let pending = pendingReviewItems()
+        // Mutable so cards created for earlier clusters of THIS call are
+        // seen by later clusters — the diarizer sometimes splits one voice
+        // into two clusters, and they must not become two cards.
+        var pending = pendingReviewItems()
 
         for cluster in clusters {
             // Too little speech to identify anyone reliably (TV, passersby):
@@ -37,13 +40,13 @@ final class SpeakerIdentityService {
                 continue
             }
 
-            // The same unknown voice may already be waiting for review from
-            // an earlier session — bump that card instead of stacking a new
-            // one per session.
+            // The same unknown voice may already be waiting for review —
+            // record this occurrence on that card instead of stacking a new
+            // one, so assigning it later retro-tags this session too.
             if let existing = pending.first(where: {
                 VoiceEmbedding.cosineSimilarity($0.embedding, embedding) >= AppSettings.speakerMatchThreshold
             }) {
-                existing.occurrenceCount += 1
+                existing.linkOccurrence(sessionID: sessionID, speakerKey: cluster.key)
                 continue
             }
 
@@ -57,24 +60,30 @@ final class SpeakerIdentityService {
                 suggestedSpeakerID: suggestion
             )
             modelContext.insert(item)
+            pending.append(item)
         }
         try? modelContext.save()
     }
 
     // MARK: - Review actions
 
-    /// The user named this voice: tag the session's segments, teach the
-    /// voiceprint, and see whether other pending cards were the same person.
+    /// The user named this voice: tag its segments in every session it was
+    /// heard in, teach the voiceprint, and see whether other pending cards
+    /// were the same person.
     func assign(_ item: SpeakerReviewItem, to speaker: Speaker) {
         item.status = .assigned
-        tagSegments(sessionID: item.sessionID, speakerKey: item.speakerKey, with: speaker)
+        for occurrence in item.allOccurrences {
+            tagSegments(sessionID: occurrence.sessionID, speakerKey: occurrence.speakerKey, with: speaker)
+        }
         fold(item.embedding, into: speaker)
 
         // Naming Dad once should clear his other queued cards too.
         for other in pendingReviewItems() where other.id != item.id {
             if VoiceEmbedding.cosineSimilarity(other.embedding, speaker.embedding) >= AppSettings.speakerMatchThreshold {
                 other.status = .assigned
-                tagSegments(sessionID: other.sessionID, speakerKey: other.speakerKey, with: speaker)
+                for occurrence in other.allOccurrences {
+                    tagSegments(sessionID: occurrence.sessionID, speakerKey: occurrence.speakerKey, with: speaker)
+                }
                 fold(other.embedding, into: speaker)
             }
         }
@@ -180,10 +189,7 @@ final class SpeakerIdentityService {
     }
 
     private func pendingReviewItems() -> [SpeakerReviewItem] {
-        let pending = SpeakerReviewItem.Status.pending.rawValue
-        let descriptor = FetchDescriptor<SpeakerReviewItem>(predicate: #Predicate {
-            $0.statusRaw == pending
-        })
+        let descriptor = FetchDescriptor<SpeakerReviewItem>(predicate: SpeakerReviewItem.pendingPredicate)
         return (try? modelContext.fetch(descriptor)) ?? []
     }
 

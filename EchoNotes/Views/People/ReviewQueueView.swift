@@ -14,9 +14,11 @@ struct ReviewQueueView: View {
     @State private var dragOffset: CGSize = .zero
 
     private var ordered: [SpeakerReviewItem] {
-        let skipped = items.filter { skippedIDs.contains($0.id) }
-            .sorted { (skippedIDs.firstIndex(of: $0.id) ?? 0) < (skippedIDs.firstIndex(of: $1.id) ?? 0) }
-        return items.filter { !skippedIDs.contains($0.id) } + skipped
+        // O(n): skippedIDs is already in skip order; recomputed every drag
+        // frame, so it must stay cheap.
+        let skippedSet = Set(skippedIDs)
+        let byID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+        return items.filter { !skippedSet.contains($0.id) } + skippedIDs.compactMap { byID[$0] }
     }
 
     var body: some View {

@@ -5,6 +5,8 @@ struct TranscriptSectionView: View {
     /// Wired to audio playback when available; timestamps become tappable.
     var seek: ((TimeInterval) -> Void)? = nil
 
+    @Environment(RecordingCoordinator.self) private var coordinator
+
     var body: some View {
         let segments = session.sortedSegments
         if segments.isEmpty {
@@ -16,14 +18,16 @@ struct TranscriptSectionView: View {
                     : "No speech was transcribed for this recording.")
             )
         } else {
-            let dominantLanguage = session.dominantLanguageCode
-            let speakerNumbers = speakerNumbersByFirstAppearance(segments)
+            let dominantLanguage = RecordingSession.dominantLanguageCode(of: segments)
+            // Canonical numbering shared with attributedTranscript, so the
+            // note's "Speaker 2" is the same voice as the UI's "Speaker 2".
+            let speakerNumbers = RecordingSession.speakerNumbersByFirstAppearance(of: segments)
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     if session.status == .enriching {
                         StatusBanner(
-                            kind: .progress(nil),
+                            kind: .progress(enrichmentFraction),
                             message: "Preliminary transcript — languages and speakers are being worked out…"
                         )
                     }
@@ -133,14 +137,11 @@ struct TranscriptSectionView: View {
         return SpeakerPalette.unidentified
     }
 
-    /// "Speaker 1" is whoever talked first, per session.
-    private func speakerNumbersByFirstAppearance(_ segments: [TranscriptSegment]) -> [String: Int] {
-        var numbers: [String: Int] = [:]
-        for segment in segments {
-            if let key = segment.speakerKey, numbers[key] == nil {
-                numbers[key] = numbers.count + 1
-            }
+    /// Fraction of the audio processed so far, nil while queued.
+    private var enrichmentFraction: Double? {
+        if case .processing(let fraction) = coordinator.enrichmentProgress[session.id] {
+            return fraction
         }
-        return numbers
+        return nil
     }
 }

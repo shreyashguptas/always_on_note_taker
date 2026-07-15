@@ -2,7 +2,7 @@ import SwiftUI
 import SwiftData
 
 struct RootTabView: View {
-    @Query(filter: #Predicate<SpeakerReviewItem> { $0.statusRaw == "pending" })
+    @Query(filter: SpeakerReviewItem.pendingPredicate)
     private var pendingReviewItems: [SpeakerReviewItem]
 
     var body: some View {

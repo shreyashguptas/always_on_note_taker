@@ -71,6 +71,15 @@ struct SettingsView: View {
                 } label: {
                     Label("Remove downloaded models", systemImage: "trash")
                 }
+                // A queued/in-flight processing job holds a path into these
+                // files; deleting them out from under it would fail that
+                // recording's only transcription attempt.
+                .disabled(coordinator.isEnrichmentActive)
+                if coordinator.isEnrichmentActive {
+                    Text("A recording is being processed — models can be removed when it finishes.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         } header: {
             Text("Speaker recognition")

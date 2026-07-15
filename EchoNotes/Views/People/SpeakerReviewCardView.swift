@@ -16,13 +16,9 @@ struct SpeakerReviewCardView: View {
     @State private var playback = AudioPlaybackService()
     @State private var newName = ""
     @FocusState private var nameFieldFocused: Bool
-
-    private var session: RecordingSession? {
-        let id = item.sessionID
-        var descriptor = FetchDescriptor<RecordingSession>(predicate: #Predicate { $0.id == id })
-        descriptor.fetchLimit = 1
-        return try? modelContext.fetch(descriptor).first
-    }
+    /// Resolved once per card — body re-evaluates every frame of a card
+    /// drag, and a SwiftData fetch per frame would jank the swipe.
+    @State private var session: RecordingSession?
 
     private var suggestedSpeaker: Speaker? {
         guard let id = item.suggestedSpeakerID else { return nil }
@@ -48,7 +44,16 @@ struct SpeakerReviewCardView: View {
             RoundedRectangle(cornerRadius: 20)
                 .strokeBorder(.quaternary, lineWidth: 1)
         )
+        .onAppear { fetchSessionIfNeeded() }
         .onDisappear { playback.stop() }
+    }
+
+    private func fetchSessionIfNeeded() {
+        guard session?.id != item.sessionID else { return }
+        let id = item.sessionID
+        var descriptor = FetchDescriptor<RecordingSession>(predicate: #Predicate { $0.id == id })
+        descriptor.fetchLimit = 1
+        session = try? modelContext.fetch(descriptor).first
     }
 
     // MARK: - Pieces

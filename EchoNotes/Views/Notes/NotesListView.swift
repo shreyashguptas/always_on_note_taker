@@ -83,9 +83,9 @@ struct NotesListView: View {
 
     private func delete(_ toDelete: [RecordingSession]) {
         for session in toDelete {
-            // Pending voice-review cards play audio from this file; they go
-            // with it.
-            coordinator.purgeSpeakerReviewItems(for: session.id)
+            // Stops any in-flight processing of this recording and drops
+            // pending voice-review cards that play audio from its file.
+            coordinator.sessionWillBeDeleted(session.id)
             Persistence.deleteAudioFile(named: session.audioFileName)
             modelContext.delete(session)
         }

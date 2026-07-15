@@ -84,10 +84,33 @@ final class RecordingSession {
 
     /// Most common segment language in this recording, when known.
     var dominantLanguageCode: String? {
-        let codes = segments.compactMap(\.languageCode)
-        guard !codes.isEmpty else { return nil }
-        let counts = Dictionary(grouping: codes, by: { $0 }).mapValues(\.count)
+        Self.dominantLanguageCode(of: segments)
+    }
+
+    static func dominantLanguageCode(of segments: [TranscriptSegment]) -> String? {
+        var counts: [String: Int] = [:]
+        for segment in segments {
+            if let code = segment.languageCode {
+                counts[code, default: 0] += 1
+            }
+        }
         return counts.max { $0.value < $1.value }?.key
+    }
+
+    /// THE canonical "Speaker n" numbering: every diarized cluster gets a
+    /// number by first appearance in transcript order, whether or not it was
+    /// later resolved to a named person. The transcript UI and the
+    /// summarizer input must both use this map — independent numbering
+    /// would let a note's "Speaker 2: book flights" point at a different
+    /// voice than the transcript's "Speaker 2" header.
+    static func speakerNumbersByFirstAppearance(of segments: [TranscriptSegment]) -> [String: Int] {
+        var numbers: [String: Int] = [:]
+        for segment in segments {
+            if let key = segment.speakerKey, numbers[key] == nil {
+                numbers[key] = numbers.count + 1
+            }
+        }
+        return numbers
     }
 
     /// Transcript with one line per segment, prefixed with the speaker's name
@@ -100,8 +123,8 @@ final class RecordingSession {
         let hasAttribution = segments.contains { $0.speaker != nil || $0.speakerKey != nil || $0.languageCode != nil }
         guard hasAttribution else { return fullTranscript }
 
-        let dominant = dominantLanguageCode
-        var speakerNumbers: [String: Int] = [:]
+        let dominant = Self.dominantLanguageCode(of: segments)
+        let speakerNumbers = Self.speakerNumbersByFirstAppearance(of: segments)
         return segments.map { segment in
             var line = ""
             if let code = segment.languageCode, code != dominant {
@@ -109,14 +132,30 @@ final class RecordingSession {
             }
             if let name = segment.speaker?.name, !name.isEmpty {
                 line += "\(name): "
-            } else if let key = segment.speakerKey {
-                let number = speakerNumbers[key] ?? speakerNumbers.count + 1
-                speakerNumbers[key] = number
+            } else if let key = segment.speakerKey, let number = speakerNumbers[key] {
                 line += "Speaker \(number): "
             }
             return line + segment.text
         }
         .joined(separator: "\n")
+    }
+
+    // MARK: - Transcript preview (denormalized for search/list rows)
+
+    /// Single home for the preview-building policy, shared by the live
+    /// transcription path (incremental) and the enrichment path (rebuild).
+    func appendToTranscriptPreview(_ text: String) {
+        guard transcriptPreview.count < AppSettings.transcriptPreviewLength else { return }
+        let combined = transcriptPreview.isEmpty ? text : transcriptPreview + " " + text
+        transcriptPreview = String(combined.prefix(AppSettings.transcriptPreviewLength))
+    }
+
+    func rebuildTranscriptPreview(from texts: [String]) {
+        transcriptPreview = ""
+        for text in texts {
+            if transcriptPreview.count >= AppSettings.transcriptPreviewLength { break }
+            appendToTranscriptPreview(text)
+        }
     }
 
     /// Title to show in lists: the generated one when available, otherwise a

@@ -4,7 +4,7 @@ import SwiftData
 /// Third tab: review new voices (card stack) and manage known people.
 struct PeopleView: View {
     @Query(
-        filter: #Predicate<SpeakerReviewItem> { $0.statusRaw == "pending" },
+        filter: SpeakerReviewItem.pendingPredicate,
         sort: \SpeakerReviewItem.createdAt,
         order: .reverse
     )

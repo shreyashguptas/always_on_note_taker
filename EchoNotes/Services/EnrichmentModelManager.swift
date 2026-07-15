@@ -147,17 +147,21 @@ final class EnrichmentModelManager {
                 progressCallback: { progress in
                     let fraction = progress.fractionCompleted
                     Task { @MainActor [weak self] in
-                        self?.whisperState = .downloading(fraction)
+                        // A straggler progress hop must not overwrite the
+                        // terminal .ready/.failed state set below — that
+                        // would wedge isDownloading until relaunch.
+                        guard let self, case .downloading = self.whisperState else { return }
+                        self.whisperState = .downloading(fraction)
                     }
                 }
             )
-            // Store the location relative to Application Support: the
-            // container's absolute path changes between launches.
-            let relative = folder.path.replacingOccurrences(
-                of: URL.applicationSupportDirectory.path + "/",
-                with: ""
-            )
-            UserDefaults.standard.set(relative, forKey: Self.whisperFolderKey(selectedVariant))
+            // Store the location relative to our fixed download base. The
+            // container's absolute path changes between launches, and path
+            // canonicalization (/var vs /private/var) makes naive prefix
+            // stripping unreliable — anchor on the base folder's name.
+            if let relative = Self.pathRelativeToDownloadBase(folder) {
+                UserDefaults.standard.set(relative, forKey: Self.whisperFolderKey(selectedVariant))
+            }
             whisperModelFolder = folder
             whisperState = .ready
         } catch {
@@ -165,18 +169,32 @@ final class EnrichmentModelManager {
         }
     }
 
+    private static let whisperBaseName = "WhisperModels"
+
+    /// "sub/path/inside/WhisperModels", or nil when the URL isn't under the
+    /// download base at all.
+    private static func pathRelativeToDownloadBase(_ url: URL) -> String? {
+        let components = url.pathComponents
+        guard let anchor = components.lastIndex(of: whisperBaseName),
+              anchor + 1 < components.count else {
+            return nil
+        }
+        return components[(anchor + 1)...].joined(separator: "/")
+    }
+
     /// Fixed download root so installs can be found again (and deleted)
     /// across launches: Application Support/WhisperModels/.
     private static let whisperDownloadBase: URL? = URL.applicationSupportDirectory
-        .appending(path: "WhisperModels", directoryHint: .isDirectory)
+        .appending(path: whisperBaseName, directoryHint: .isDirectory)
 
     /// The folder a previous WhisperKit.download produced for the selected
     /// variant, when it still exists on disk with model files inside.
     private func installedWhisperFolder() -> URL? {
-        guard let relative = UserDefaults.standard.string(forKey: Self.whisperFolderKey(selectedVariant)) else {
+        guard let base = Self.whisperDownloadBase,
+              let relative = UserDefaults.standard.string(forKey: Self.whisperFolderKey(selectedVariant)) else {
             return nil
         }
-        let folder = URL.applicationSupportDirectory.appending(path: relative, directoryHint: .isDirectory)
+        let folder = base.appending(path: relative, directoryHint: .isDirectory)
         let contents = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
         return contents.isEmpty ? nil : folder
     }

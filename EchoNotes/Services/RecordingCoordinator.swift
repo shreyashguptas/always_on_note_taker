@@ -105,9 +105,6 @@ final class RecordingCoordinator {
     private let enrichment = TranscriptEnrichmentService()
     private let speakerIdentity: SpeakerIdentityService
     private let modelContext: ModelContext
-    /// Sessions whose preliminary (live) segments have already been replaced
-    /// by enriched ones this launch; the first enriched window clears them.
-    private var enrichmentReplacedSessions: Set<UUID> = []
     private var resumeTask: Task<Void, Never>?
     private var activeSessionID: UUID?
     /// Monotonic per-session segment indices; avoids faulting the whole
@@ -144,11 +141,8 @@ final class RecordingCoordinator {
         enrichment.onProgress = { [weak self] id, phase in
             self?.enrichmentProgress[id] = phase
         }
-        enrichment.onWindowSegments = { [weak self] segments, id in
-            self?.applyEnrichedSegments(segments, to: id)
-        }
-        enrichment.onFinished = { [weak self] id, clusters in
-            self?.finishEnrichment(for: id, clusters: clusters)
+        enrichment.onFinished = { [weak self] id, segments, clusters in
+            self?.finishEnrichment(for: id, segments: segments, clusters: clusters)
         }
         enrichment.onFailed = { [weak self] id, message in
             self?.failEnrichment(for: id, message: message)
@@ -190,6 +184,10 @@ final class RecordingCoordinator {
         await speechModel.ensureModelInstalled()
         guard isEnabled else { return } // toggled off during the download
 
+        // Refresh first: the degraded-mode copy below depends on whether the
+        // enrichment models are installed.
+        enrichmentModels.refreshInstalledState()
+
         // Live transcription is a nice-to-have now that the post-session
         // pass produces the authoritative transcript: when the live model
         // can't run (a Hindi-locale device, a failed download), recording
@@ -201,15 +199,23 @@ final class RecordingCoordinator {
             transcriptions.setLocale(speechModel.locale)
         case .unsupportedLocale:
             transcriptions.setLiveTranscriptionEnabled(false)
-            liveTranscriptUnavailableMessage = "Live transcription isn't available for your language. Recordings are transcribed right after each session instead."
+            liveTranscriptUnavailableMessage = degradedLiveMessage(problem: "Live transcription isn't available for your language.")
         default:
             transcriptions.setLiveTranscriptionEnabled(false)
-            liveTranscriptUnavailableMessage = "The live speech model isn't available. Recordings are transcribed right after each session instead."
+            liveTranscriptUnavailableMessage = degradedLiveMessage(problem: "The live speech model isn't available.")
         }
-        enrichmentModels.refreshInstalledState()
         aiUnavailabilityMessage = SummarizationService.unavailabilityMessage
 
         startCaptureOrRetry()
+    }
+
+    /// Honest degraded-mode copy: only promise a post-session transcript
+    /// when the models that produce it are actually installed.
+    private func degradedLiveMessage(problem: String) -> String {
+        if enrichmentModels.isReady {
+            return problem + " Recordings are transcribed right after each session instead."
+        }
+        return problem + " Download the multilingual models in Settings so recordings can be transcribed after each session."
     }
 
     private func disable() {
@@ -411,26 +417,25 @@ final class RecordingCoordinator {
     /// downloaded after the fact).
     func retryEnrichment(for session: RecordingSession) {
         guard session.status == .complete || session.status == .failed else { return }
-        enrichmentReplacedSessions.remove(session.id)
         _ = startEnrichmentIfPossible(for: session)
     }
 
-    /// One enriched window arrived: the first replaces the preliminary live
-    /// segments, later ones append behind it.
-    private func applyEnrichedSegments(_ segments: [TranscriptEnrichmentService.EnrichedSegment], to id: UUID) {
+    /// The pass succeeded end-to-end: replace the preliminary transcript
+    /// with the enriched one in a single transaction. Replacement only ever
+    /// happens here — a failure partway through must never cost the
+    /// transcript the session already has.
+    private func finishEnrichment(
+        for id: UUID,
+        segments: [TranscriptEnrichmentService.EnrichedSegment],
+        clusters: [TranscriptEnrichmentService.SpeakerCluster]
+    ) {
+        enrichmentProgress.removeValue(forKey: id)
         guard let session = fetchSession(id: id) else { return }
 
-        if !enrichmentReplacedSessions.contains(id) {
-            enrichmentReplacedSessions.insert(id)
-            for old in session.segments {
-                modelContext.delete(old)
-            }
-            session.transcriptPreview = ""
-            segmentCounters[id] = 0
+        for old in session.segments {
+            modelContext.delete(old)
         }
-
-        var index = segmentCounters[id] ?? 0
-        for segment in segments {
+        for (index, segment) in segments.enumerated() {
             let stored = TranscriptSegment(
                 index: index,
                 text: segment.text,
@@ -439,29 +444,14 @@ final class RecordingCoordinator {
                 languageCode: segment.languageCode,
                 speakerKey: segment.speakerKey
             )
-            index += 1
             modelContext.insert(stored)
             stored.session = session
-
-            if session.transcriptPreview.count < AppSettings.transcriptPreviewLength {
-                let combined = session.transcriptPreview.isEmpty
-                    ? segment.text
-                    : session.transcriptPreview + " " + segment.text
-                session.transcriptPreview = String(combined.prefix(AppSettings.transcriptPreviewLength))
-            }
         }
-        segmentCounters[id] = index
-        try? modelContext.save()
-    }
-
-    private func finishEnrichment(for id: UUID, clusters: [TranscriptEnrichmentService.SpeakerCluster]) {
-        enrichmentProgress.removeValue(forKey: id)
-        segmentCounters.removeValue(forKey: id)
-        guard let session = fetchSession(id: id) else { return }
+        session.rebuildTranscriptPreview(from: segments.map(\.text))
+        session.enrichmentState = .done
 
         speakerIdentity.processClusters(clusters, sessionID: id)
-        session.enrichmentState = .done
-        if session.segments.isEmpty {
+        if segments.isEmpty {
             session.status = .complete
             try? modelContext.save()
         } else {
@@ -471,27 +461,33 @@ final class RecordingCoordinator {
 
     private func failEnrichment(for id: UUID, message: String) {
         enrichmentProgress.removeValue(forKey: id)
-        segmentCounters.removeValue(forKey: id)
         guard let session = fetchSession(id: id) else { return }
 
         session.enrichmentState = .failed
         if session.segments.isEmpty {
-            // Whatever the pass got through is gone AND there was no
-            // preliminary transcript to fall back to.
+            // No preliminary transcript existed to fall back to (live
+            // transcription was unavailable or heard nothing).
             session.status = .failed
             try? modelContext.save()
         } else {
-            // Keep whatever transcript exists (preliminary, or the enriched
-            // windows that landed before the failure) and finish the note.
+            // The preliminary transcript is untouched (replacement only
+            // happens on success); finish the note from it.
             summarize(session)
         }
     }
 
-    /// Deleting a note should also drop any pending voice-review cards that
-    /// point at its (soon to be deleted) audio.
-    func purgeSpeakerReviewItems(for sessionID: UUID) {
+    /// Call before deleting a session: stops any queued/in-flight enrichment
+    /// for it and drops pending voice-review cards that would point at its
+    /// (soon to be deleted) audio.
+    func sessionWillBeDeleted(_ sessionID: UUID) {
+        enrichment.cancel(sessionID: sessionID)
+        enrichmentProgress.removeValue(forKey: sessionID)
         speakerIdentity.purgeReviewItems(for: sessionID)
     }
+
+    /// Whether the multilingual/speaker pass is running or queued for any
+    /// session — Settings uses this to keep "Remove models" safe.
+    var isEnrichmentActive: Bool { !enrichmentProgress.isEmpty }
 
     /// The People tab's actions, routed through the one policy owner.
     var speakerIdentityService: SpeakerIdentityService { speakerIdentity }
@@ -571,8 +567,19 @@ final class RecordingCoordinator {
             if startEnrichmentIfPossible(for: session) { continue }
 
             if segments.isEmpty {
-                Persistence.deleteAudioFile(named: session.audioFileName)
-                modelContext.delete(session)
+                // No transcript — but the audio may still be transcribable
+                // later (live transcription can be legitimately disabled and
+                // the enrichment models merely not downloaded yet). Only a
+                // session with nothing to recover from is deleted.
+                if let audioSeconds = Self.readableAudioSeconds(of: session.audioFileURL),
+                   audioSeconds >= AppSettings.minimumSessionDuration {
+                    if session.duration == 0 { session.duration = audioSeconds }
+                    session.enrichmentState = .skipped
+                    session.status = .complete
+                } else {
+                    Persistence.deleteAudioFile(named: session.audioFileName)
+                    modelContext.delete(session)
+                }
                 continue
             }
             if session.enrichmentState == .pending { session.enrichmentState = .failed }
@@ -613,13 +620,7 @@ final class RecordingCoordinator {
         )
         modelContext.insert(stored)
         stored.session = session
-
-        if session.transcriptPreview.count < AppSettings.transcriptPreviewLength {
-            let combined = session.transcriptPreview.isEmpty
-                ? segment.text
-                : session.transcriptPreview + " " + segment.text
-            session.transcriptPreview = String(combined.prefix(AppSettings.transcriptPreviewLength))
-        }
+        session.appendToTranscriptPreview(segment.text)
 
         // Persist at most every few seconds — enough for crash recovery
         // without a disk commit per spoken sentence. (Session end always
@@ -642,5 +643,17 @@ final class RecordingCoordinator {
         var descriptor = FetchDescriptor<RecordingSession>(predicate: #Predicate { $0.id == id })
         descriptor.fetchLimit = 1
         return try? modelContext.fetch(descriptor).first
+    }
+
+    /// Playable length of a session's audio file, or nil when the file is
+    /// missing/unreadable (e.g. a writer killed mid-header).
+    private static func readableAudioSeconds(of url: URL?) -> TimeInterval? {
+        guard let url, FileManager.default.fileExists(atPath: url.path),
+              let file = try? AVAudioFile(forReading: url) else {
+            return nil
+        }
+        let rate = file.processingFormat.sampleRate
+        guard rate > 0 else { return nil }
+        return Double(file.length) / rate
     }
 }

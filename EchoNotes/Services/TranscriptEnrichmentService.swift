@@ -11,10 +11,11 @@ import WhisperKit
 ///
 /// Jobs are processed strictly one at a time on a background task. The audio
 /// file is decoded in ten-minute windows — both models take raw Float32
-/// samples, and a two-hour file would be ~460 MB decoded at once — and each
-/// window's segments are delivered incrementally so the transcript fills in
-/// visibly. Models are loaded lazily on the first job and released when the
-/// queue drains (they hold north of a gigabyte).
+/// samples, and a two-hour file would be ~460 MB decoded at once. The full
+/// result is delivered only on success (progress streams per window), so a
+/// mid-file failure never costs a transcript. Models are loaded lazily on
+/// the first job and released when the queue drains (they hold north of a
+/// gigabyte).
 final class TranscriptEnrichmentService {
     struct EnrichedSegment {
         let text: String
@@ -55,14 +56,18 @@ final class TranscriptEnrichmentService {
 
     // All callbacks delivered on the main queue.
     var onProgress: ((UUID, Phase) -> Void)?
-    /// One batch of finalized segments per decoded window, in order.
-    var onWindowSegments: (([EnrichedSegment], UUID) -> Void)?
-    var onFinished: ((UUID, [SpeakerCluster]) -> Void)?
+    /// The complete enriched transcript plus every voice found — delivered
+    /// once, only on full success, so the caller can replace the preliminary
+    /// transcript atomically. A failure partway through must never cost the
+    /// transcript the session already has.
+    var onFinished: ((UUID, [EnrichedSegment], [SpeakerCluster]) -> Void)?
     var onFailed: ((UUID, String) -> Void)?
 
     private let lock = NSLock()
     private var queue: [Job] = []
     private var worker: Task<Void, Never>?
+    /// Sessions whose jobs should stop (their note was deleted).
+    private var cancelled: Set<UUID> = []
 
     var isProcessing: Bool {
         lock.lock()
@@ -70,10 +75,17 @@ final class TranscriptEnrichmentService {
         return worker != nil
     }
 
-    // Engines live only while the queue is non-empty.
+    // Engines live only while the queue is non-empty. Touched exclusively by
+    // the single worker task; the drain/unload happens under the lock (see
+    // dequeue) so a racing enqueue can never start a second worker while
+    // these are still being torn down.
     private var whisper: WhisperKit?
     private var loadedWhisperVariant: String?
-    private var diarizer: DiarizerManager?
+    /// The diarizer's Core ML models are cached across jobs, but the manager
+    /// itself is recreated per job: it accumulates a speaker database for
+    /// cross-window consistency, and that database must not leak one
+    /// session's voices into the next session's clustering.
+    private var diarizerModels: DiarizerModels?
 
     // MARK: - Queueing
 
@@ -84,51 +96,72 @@ final class TranscriptEnrichmentService {
             lock.unlock()
             return
         }
+        cancelled.remove(job.sessionID)
         queue.append(job)
-        let needsWorker = worker == nil
+        if worker == nil {
+            // Assigned under the same lock that dequeue() clears it under:
+            // if the slot were filled after the task started, a task that
+            // drains instantly could null the slot first and leave a dead
+            // reference blocking every future job.
+            worker = Task.detached(priority: .utility) { [weak self] in
+                while let self, let job = self.dequeue() {
+                    await self.process(job)
+                }
+            }
+        }
         lock.unlock()
 
         dispatchProgress(job.sessionID, .waiting)
-        if needsWorker {
-            startWorker()
-        }
     }
 
-    private func startWorker() {
-        let task = Task.detached(priority: .utility) { [weak self] in
-            while let self, let job = self.dequeue() {
-                await self.process(job)
-            }
-            self?.unloadEngines()
-        }
+    /// The session is being deleted: drop its queued job, or tell an
+    /// in-flight one to stop at the next window boundary. No callbacks fire
+    /// for a cancelled session.
+    func cancel(sessionID: UUID) {
         lock.lock()
-        worker = task
+        queue.removeAll { $0.sessionID == sessionID }
+        cancelled.insert(sessionID)
         lock.unlock()
+    }
+
+    private func isCancelled(_ sessionID: UUID) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled.contains(sessionID)
     }
 
     private func dequeue() -> Job? {
         lock.lock()
-        defer { lock.unlock() }
         if queue.isEmpty {
+            // Unload the engines (~1.5 GB) BEFORE clearing `worker`, all
+            // under the lock: once `worker` is nil a racing enqueue starts a
+            // new worker, and it must never observe a half-torn-down engine.
+            // The references are moved to locals so their (potentially slow)
+            // deallocation happens after the lock is released.
+            let oldWhisper = whisper
+            let oldModels = diarizerModels
+            whisper = nil
+            loadedWhisperVariant = nil
+            diarizerModels = nil
             worker = nil
+            lock.unlock()
+            _ = oldWhisper
+            _ = oldModels
             return nil
         }
-        return queue.removeFirst()
-    }
-
-    private func unloadEngines() {
-        // Runs on the worker after the queue drains; ~1.5 GB back to the
-        // system until the next session ends.
-        whisper = nil
-        loadedWhisperVariant = nil
-        diarizer = nil
+        let job = queue.removeFirst()
+        lock.unlock()
+        return job
     }
 
     // MARK: - Processing one session
 
     private func process(_ job: Job) async {
+        guard !isCancelled(job.sessionID) else { return }
+
+        let diarizer: DiarizerManager?
         do {
-            try await loadEnginesIfNeeded(job)
+            diarizer = try await loadEngines(job)
         } catch {
             dispatchFailed(job.sessionID, "The processing models couldn't be loaded. You can retry from the note.")
             return
@@ -152,9 +185,11 @@ final class TranscriptEnrichmentService {
 
         let decoder = WindowedAudioDecoder(file: file)
         var clusters = ClusterAccumulator()
+        var allSegments: [EnrichedSegment] = []
         var windowStart: TimeInterval = 0
 
         while windowStart < totalSeconds {
+            if isCancelled(job.sessionID) { return }
             await waitWhileThermallyConstrained()
 
             let windowSeconds = min(AppSettings.enrichmentWindowSeconds, totalSeconds - windowStart)
@@ -183,25 +218,25 @@ final class TranscriptEnrichmentService {
                 }
             }
 
-            let segments: [EnrichedSegment]
             do {
-                segments = try await transcribeWindow(samples, windowStart: windowStart, turns: turns)
+                allSegments += try await transcribeWindow(samples, windowStart: windowStart, turns: turns)
             } catch {
                 dispatchFailed(job.sessionID, "Transcription failed partway through. You can retry from the note.")
                 return
             }
 
-            if !segments.isEmpty {
-                dispatchWindowSegments(segments, job.sessionID)
-            }
             windowStart += windowSeconds
             dispatchProgress(job.sessionID, .processing(min(1, windowStart / totalSeconds)))
         }
 
-        dispatchFinished(job.sessionID, clusters.finish())
+        guard !isCancelled(job.sessionID) else { return }
+        dispatchFinished(job.sessionID, allSegments, clusters.finish())
     }
 
-    private func loadEnginesIfNeeded(_ job: Job) async throws {
+    /// Loads (or reuses) the Whisper engine and builds a FRESH diarizer for
+    /// this job, so speaker clustering starts from a clean database — one
+    /// session's voices must not seed the next session's clusters.
+    private func loadEngines(_ job: Job) async throws -> DiarizerManager? {
         if whisper == nil || loadedWhisperVariant != job.whisperVariant {
             let config = WhisperKitConfig(
                 model: job.whisperVariant,
@@ -212,14 +247,15 @@ final class TranscriptEnrichmentService {
             whisper = try await WhisperKit(config)
             loadedWhisperVariant = job.whisperVariant
         }
-        if diarizer == nil {
+        if diarizerModels == nil {
             // Models were installed by EnrichmentModelManager; this reuses
             // the local cache and only hits the network if it was wiped.
-            let models = try await DiarizerModels.downloadIfNeeded()
-            let manager = DiarizerManager()
-            manager.initialize(models: models)
-            diarizer = manager
+            diarizerModels = try await DiarizerModels.downloadIfNeeded()
         }
+        guard let diarizerModels else { return nil }
+        let manager = DiarizerManager()
+        manager.initialize(models: diarizerModels)
+        return manager
     }
 
     // MARK: - Whisper
@@ -367,14 +403,9 @@ final class TranscriptEnrichmentService {
         DispatchQueue.main.async { onProgress(id, phase) }
     }
 
-    private func dispatchWindowSegments(_ segments: [EnrichedSegment], _ id: UUID) {
-        guard let onWindowSegments else { return }
-        DispatchQueue.main.async { onWindowSegments(segments, id) }
-    }
-
-    private func dispatchFinished(_ id: UUID, _ clusters: [SpeakerCluster]) {
+    private func dispatchFinished(_ id: UUID, _ segments: [EnrichedSegment], _ clusters: [SpeakerCluster]) {
         guard let onFinished else { return }
-        DispatchQueue.main.async { onFinished(id, clusters) }
+        DispatchQueue.main.async { onFinished(id, segments, clusters) }
     }
 
     private func dispatchFailed(_ id: UUID, _ message: String) {
@@ -385,11 +416,16 @@ final class TranscriptEnrichmentService {
 
 /// Sequentially decodes an audio file into 16 kHz mono Float32 windows,
 /// reading in small sub-chunks so peak memory stays at the size of one
-/// converted window rather than the raw file.
+/// converted window rather than the raw file. The sub-chunk read buffer is
+/// allocated once and reused — hundreds of transient multi-megabyte buffers
+/// would otherwise churn the allocator while the ML models already hold
+/// most of the device's memory budget.
 private final class WindowedAudioDecoder {
     private let file: AVAudioFile
     private let converter: AudioBufferConverter
     private let outputFormat: AVAudioFormat
+    private let subChunkFrames: AVAudioFrameCount
+    private let readBuffer: AVAudioPCMBuffer?
 
     init(file: AVAudioFile) {
         self.file = file
@@ -400,23 +436,23 @@ private final class WindowedAudioDecoder {
             interleaved: false
         )!
         self.converter = AudioBufferConverter(outputFormat: outputFormat)
+        self.subChunkFrames = AVAudioFrameCount(30 * file.processingFormat.sampleRate)
+        self.readBuffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: subChunkFrames)
     }
 
     /// Returns the next `seconds` of audio as 16 kHz mono samples; shorter
     /// (or empty) at end of file.
     func readWindow(seconds: TimeInterval) throws -> [Float] {
+        guard let buffer = readBuffer else { return [] }
         let sourceRate = file.processingFormat.sampleRate
         var framesWanted = AVAudioFrameCount(seconds * sourceRate)
-        let subChunkFrames = AVAudioFrameCount(30 * sourceRate)
 
         var window: [Float] = []
         window.reserveCapacity(Int(seconds * AppSettings.enrichmentSampleRate))
 
         while framesWanted > 0 {
             let toRead = min(framesWanted, subChunkFrames)
-            guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: toRead) else {
-                break
-            }
+            buffer.frameLength = 0
             try file.read(into: buffer, frameCount: toRead)
             if buffer.frameLength == 0 { break } // end of file
 
