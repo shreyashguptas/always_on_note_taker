@@ -1,0 +1,35 @@
+name: EchoNotes
+
+options:
+  bundleIdPrefix: com.shreyashg
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+  xcodeVersion: "26.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+
+targets:
+  EchoNotes:
+    type: application
+    platform: iOS
+    sources:
+      - EchoNotes
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.shreyashg.echonotes
+        PRODUCT_NAME: EchoNotes
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: EchoNotes/Info.plist
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_PREVIEWS: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        SWIFT_EMIT_LOC_STRINGS: YES
+        SUPPORTS_MACCATALYST: NO

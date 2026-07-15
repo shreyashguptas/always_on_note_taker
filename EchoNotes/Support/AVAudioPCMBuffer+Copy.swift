@@ -1,0 +1,37 @@
+import AVFAudio
+
+extension AVAudioPCMBuffer {
+    /// Deep copy of the buffer's samples. The engine tap's buffer is only
+    /// guaranteed valid inside the tap block, so anything held past it
+    /// (pre-roll, transcription hold buffer, async queues) must be a copy.
+    func deepCopy() -> AVAudioPCMBuffer? {
+        guard frameLength > 0,
+              let copy = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameLength) else {
+            return nil
+        }
+        copy.frameLength = frameLength
+
+        let source = UnsafeMutableAudioBufferListPointer(
+            UnsafeMutablePointer(mutating: audioBufferList)
+        )
+        let destination = UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
+        for (src, dst) in zip(source, destination) {
+            guard let srcData = src.mData, let dstData = dst.mData else { continue }
+            let bytes = min(Int(src.mDataByteSize), Int(dst.mDataByteSize))
+            memcpy(dstData, srcData, bytes)
+        }
+        return copy
+    }
+}
+
+extension Array where Element == AVAudioPCMBuffer {
+    /// Evicts oldest buffers until the queue holds at most `cap` seconds.
+    /// `accumulatedSeconds` is the caller-maintained running total for this
+    /// array and is decremented as buffers are evicted.
+    mutating func trimToDuration(cap: TimeInterval, accumulatedSeconds: inout TimeInterval) {
+        while accumulatedSeconds > cap, !isEmpty {
+            let removed = removeFirst()
+            accumulatedSeconds -= Double(removed.frameLength) / removed.format.sampleRate
+        }
+    }
+}
