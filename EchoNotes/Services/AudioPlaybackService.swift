@@ -18,6 +18,8 @@ final class AudioPlaybackService: NSObject, AVAudioPlayerDelegate {
 
     private var player: AVAudioPlayer?
     private var ticker: Timer?
+    /// When set, playback auto-pauses at this time (review-card snippets).
+    private var stopAt: TimeInterval?
 
     deinit {
         // Normally .onDisappear stops playback first; this catches teardown
@@ -73,6 +75,7 @@ final class AudioPlaybackService: NSObject, AVAudioPlayerDelegate {
 
     func seek(to time: TimeInterval) {
         guard let player else { return }
+        stopAt = nil
         player.currentTime = max(0, min(time, duration))
         currentTime = player.currentTime
     }
@@ -83,6 +86,14 @@ final class AudioPlaybackService: NSObject, AVAudioPlayerDelegate {
         if !isPlaying { play() }
     }
 
+    /// Plays just `start...end`, pausing automatically at the end — how
+    /// review cards audition a voice without clipping out snippet files.
+    func playRange(from start: TimeInterval, to end: TimeInterval) {
+        seek(to: start)
+        stopAt = max(start, end)
+        if !isPlaying { play() }
+    }
+
     func stop() {
         player?.stop()
         player = nil
@@ -90,6 +101,7 @@ final class AudioPlaybackService: NSObject, AVAudioPlayerDelegate {
         isLoaded = false
         duration = 0
         currentTime = 0
+        stopAt = nil
         stopTicker()
     }
 
@@ -101,6 +113,10 @@ final class AudioPlaybackService: NSObject, AVAudioPlayerDelegate {
             Task { @MainActor [weak self] in
                 guard let self, let player = self.player else { return }
                 self.currentTime = player.currentTime
+                if let stopAt = self.stopAt, player.currentTime >= stopAt {
+                    self.stopAt = nil
+                    self.pause()
+                }
             }
         }
     }

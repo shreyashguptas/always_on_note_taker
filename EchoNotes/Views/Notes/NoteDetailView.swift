@@ -3,6 +3,7 @@ import SwiftData
 
 struct NoteDetailView: View {
     let session: RecordingSession
+    @Environment(RecordingCoordinator.self) private var coordinator
 
     private enum Section: String, CaseIterable, Identifiable {
         case summary = "Summary"
@@ -36,8 +37,29 @@ struct NoteDetailView: View {
         }
         .navigationTitle(session.displayTitle)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if showsRetry {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Retry", systemImage: "arrow.clockwise") {
+                        coordinator.retryEnrichment(for: session)
+                    }
+                    .help("Re-run language detection and speaker recognition")
+                }
+            }
+        }
         .onDisappear {
             playback.stop()
+        }
+    }
+
+    /// Offer a re-run when the multilingual/speaker pass failed, or never
+    /// ran but its models have since been downloaded.
+    private var showsRetry: Bool {
+        guard session.status == .complete || session.status == .failed else { return false }
+        switch session.enrichmentState {
+        case .failed: return true
+        case .skipped, .none: return coordinator.enrichmentModels.isReady && session.audioFileURL != nil
+        case .pending, .done: return false
         }
     }
 
