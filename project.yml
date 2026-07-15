@@ -12,12 +12,40 @@ settings:
     SWIFT_VERSION: "5.0"
     IPHONEOS_DEPLOYMENT_TARGET: "26.0"
 
+# Pinned exactly: both SDKs are young and have had API churn (WhisperKit's
+# repo rename, FluidAudio's Swift 6 rewrite). Upgrades should be deliberate —
+# bump the pin, re-run the enrichment smoke tests in TESTING.md.
+packages:
+  WhisperKit:
+    url: https://github.com/argmaxinc/WhisperKit
+    exactVersion: "1.0.0"
+  FluidAudio:
+    url: https://github.com/FluidInference/FluidAudio
+    exactVersion: "0.12.4"
+
 targets:
   EchoNotes:
     type: application
     platform: iOS
     sources:
       - EchoNotes
+    dependencies:
+      - package: WhisperKit
+        product: WhisperKit
+      - package: FluidAudio
+        product: FluidAudio
+
+  EchoNotesTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - EchoNotesTests
+    dependencies:
+      - target: EchoNotes
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.shreyashg.echonotes.tests
+        GENERATE_INFOPLIST_FILE: YES
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.shreyashg.echonotes

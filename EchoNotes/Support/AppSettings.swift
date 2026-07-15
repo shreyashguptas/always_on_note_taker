@@ -42,4 +42,49 @@ enum AppSettings {
 
     /// Bars in the live waveform (also the size of the rolling levels buffer).
     static let waveformBarCount = 60
+
+    // MARK: - Post-session enrichment (multilingual transcription + speakers)
+
+    /// Audio processed per enrichment window. Both models take raw Float32
+    /// samples, so a whole 2 h file can't be decoded at once (~460 MB); one
+    /// window is ~38 MB at 16 kHz mono.
+    static let enrichmentWindowSeconds: TimeInterval = 600
+
+    /// Sample rate both enrichment models expect.
+    static let enrichmentSampleRate: Double = 16_000
+
+    /// Whisper transcription segments whose no-speech probability exceeds
+    /// this are dropped — Whisper hallucinates fluent text on silence/noise.
+    static let whisperNoSpeechCutoff: Float = 0.8
+
+    // MARK: - Speaker identification
+    //
+    // The similarity thresholds are starting points, not spec: published
+    // defaults for the embedding model are tuned for clustering within one
+    // file, while we match across sessions, rooms, and mic distances. Tune
+    // against real family audio on device before trusting them.
+
+    /// Cosine similarity at or above which a voice is auto-tagged as a known
+    /// speaker (subject to the margin rule below).
+    static let speakerMatchThreshold: Float = 0.65
+
+    /// Best match must beat the second-best by this much to auto-tag —
+    /// otherwise similar voices in one family would silently cross-tag.
+    /// Borderline cases go to the review queue instead.
+    static let speakerMatchMargin: Float = 0.10
+
+    /// Similarity at or above which a review card suggests a known speaker
+    /// ("Is this Priya?") without auto-tagging.
+    static let speakerSuggestThreshold: Float = 0.50
+
+    /// Voices with less net speech than this in a session are ignored for
+    /// identification (TV in the background, passersby).
+    static let speakerMinimumSpeech: TimeInterval = 8
+
+    /// Length of the audio snippet a review card plays for an unknown voice.
+    static let speakerSnippetDuration: TimeInterval = 10
+
+    /// Observations folded into a speaker's running-mean embedding before it
+    /// stops updating — keeps the identity plastic early, stable later.
+    static let speakerEmbeddingUpdateCap = 50
 }

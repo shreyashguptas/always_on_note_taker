@@ -4,6 +4,9 @@ struct RecordView: View {
     @Environment(RecordingCoordinator.self) private var coordinator
     @Environment(\.scenePhase) private var scenePhase
     @State private var isVisible = false
+    @State private var showsSettings = false
+    /// One-time nudge toward downloading the multilingual/speaker models.
+    @AppStorage("multilingualBannerDismissed") private var multilingualBannerDismissed = false
 
     var body: some View {
         NavigationStack {
@@ -46,6 +49,16 @@ struct RecordView: View {
             }
             .navigationTitle("EchoNotes")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Settings", systemImage: "gearshape") {
+                        showsSettings = true
+                    }
+                }
+            }
+            .sheet(isPresented: $showsSettings) {
+                SettingsView()
+            }
             // Waveform updates are pure UI; don't pay for them unless this
             // tab is visible AND the app is foreground. (scenePhase changes
             // reach retained-but-hidden tabs too, hence the isVisible check.)
@@ -152,16 +165,31 @@ struct RecordView: View {
             StatusBanner(kind: .progress(nil), message: "Checking the on-device speech model…")
         case .downloading(let fraction):
             StatusBanner(kind: .progress(fraction), message: "Downloading the on-device speech model…")
-        case .failed(let message):
-            StatusBanner(kind: .warning, message: message)
-        case .unsupportedLocale:
-            StatusBanner(kind: .warning, message: "On-device transcription isn't available for your language yet.")
-        case .unknown, .ready:
+        case .unknown, .ready, .failed, .unsupportedLocale:
+            // Live-model problems no longer block recording; the message
+            // below explains the degraded live view instead.
             EmptyView()
+        }
+
+        if coordinator.isEnabled, let message = coordinator.liveTranscriptUnavailableMessage {
+            StatusBanner(kind: .info, message: message)
         }
 
         if coordinator.isEnabled, let message = coordinator.aiUnavailabilityMessage {
             StatusBanner(kind: .info, message: message)
+        }
+
+        if !coordinator.enrichmentModels.isReady,
+           !coordinator.enrichmentModels.isDownloading,
+           !multilingualBannerDismissed {
+            StatusBanner(
+                kind: .info,
+                message: "Download the multilingual models to get Hindi, Spanish, German (and more) transcription plus who-said-what in every note.",
+                actionTitle: "Set up"
+            ) {
+                multilingualBannerDismissed = true
+                showsSettings = true
+            }
         }
     }
 }
