@@ -6,6 +6,8 @@ enum Persistence {
         RecordingSession.self,
         TranscriptSegment.self,
         GeneratedNote.self,
+        Speaker.self,
+        SpeakerReviewItem.self,
     ])
 
     static func makeContainer(inMemory: Bool = false) -> ModelContainer {

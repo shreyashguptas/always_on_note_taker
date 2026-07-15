@@ -25,7 +25,13 @@ enum SummarizationService {
         You organize transcripts of personal voice recordings (meetings, \
         conversations, spoken reminders) into clear notes. Use only \
         information that appears in the transcript. Never invent names, \
-        dates, or facts. Write in plain, direct language.
+        dates, or facts. Write in plain, direct language. Lines may be \
+        prefixed with the speaker's name ("Priya: …") — when a task clearly \
+        belongs to a named speaker, name them in the action item ("Priya: \
+        book the flights"). The transcript may mix several languages; \
+        stretches in another language are marked like [hi] or [es]. Write \
+        the note in English, keeping names and short quoted phrases as \
+        spoken.
         """
 
     /// True when the Apple Intelligence model can be used right now.
