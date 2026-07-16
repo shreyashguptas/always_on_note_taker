@@ -76,6 +76,11 @@ final class RecordingCoordinator {
         enrichment.onFailed = { [weak self] id, reason in
             self?.failEnrichment(for: id, reason: reason)
         }
+        // The moment both model sets are installed, sweep recordings that
+        // were parked waiting for them.
+        enrichmentModels.onBecameReady = { [weak self] in
+            self?.transcribeBacklog()
+        }
 
         // Main-actor ordering guarantees this runs before any user-initiated
         // enable() can create a live session.
@@ -126,6 +131,9 @@ final class RecordingCoordinator {
     /// delivered), reclaim the mic now rather than waiting for a
     /// notification that may never come.
     func applicationDidBecomeActive() {
+        // A model download interrupted while the app was away (or killed)
+        // picks itself back up — no hunting for the download button again.
+        enrichmentModels.resumeInterruptedDownloads()
         guard isEnabled, !capture.isRunning else { return }
         startCaptureOrRetry()
     }
@@ -316,7 +324,7 @@ final class RecordingCoordinator {
             sessionID: session.id,
             audioURL: audioURL,
             whisperModelFolder: whisperFolder,
-            whisperVariant: enrichmentModels.selectedVariant.whisperKitModelName
+            whisperVariant: EnrichmentModelManager.whisperModelName
         ))
         return true
     }

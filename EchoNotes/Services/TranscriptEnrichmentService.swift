@@ -251,7 +251,27 @@ final class TranscriptEnrichmentService {
         }
 
         guard !isCancelled(job.sessionID) else { return }
-        dispatchFinished(job.sessionID, allSegments, clusters.finish())
+
+        // Fold same-voice clusters the diarizer split (a quiet single
+        // speaker must not come out as "Speaker 1" and "Speaker 2"), and
+        // point the transcript's speaker keys at the surviving clusters.
+        let (mergedClusters, remap) = SpeakerClusterMerging.merge(
+            clusters.finish(),
+            threshold: AppSettings.speakerClusterMergeThreshold
+        )
+        if !remap.isEmpty {
+            allSegments = allSegments.map { segment in
+                guard let key = segment.speakerKey, let survivor = remap[key] else { return segment }
+                return EnrichedSegment(
+                    text: segment.text,
+                    startTime: segment.startTime,
+                    endTime: segment.endTime,
+                    languageCode: segment.languageCode,
+                    speakerKey: survivor
+                )
+            }
+        }
+        dispatchFinished(job.sessionID, allSegments, mergedClusters)
     }
 
     /// Loads (or reuses) the Whisper engine and builds a FRESH diarizer for
@@ -373,11 +393,13 @@ final class TranscriptEnrichmentService {
     // MARK: - Cluster accumulation
 
     /// Folds per-window diarization results into per-speaker totals: net
-    /// speech, latest embedding, and the longest single turn (whose middle
-    /// ten seconds become the review snippet).
+    /// speech, a duration-weighted voiceprint, and the longest single turn
+    /// (whose middle ten seconds become the review snippet).
     private struct ClusterAccumulator {
         private struct Entry {
-            var embedding: [Float]
+            /// Duration-weighted sum of segment embeddings — only direction
+            /// matters for cosine similarity, so it's normalized at finish.
+            var embeddingSum: [Float] = []
             var totalSpeech: TimeInterval = 0
             var longestTurnStart: TimeInterval = 0
             var longestTurnEnd: TimeInterval = 0
@@ -386,35 +408,41 @@ final class TranscriptEnrichmentService {
         private var entries: [String: Entry] = [:]
 
         mutating func fold(_ result: DiarizationResult, windowStart: TimeInterval) {
+            // Voiceprints come from the segments themselves:
+            // `DiarizationResult.speakerDatabase` is only populated in the
+            // library's debug mode, so relying on it silently produced zero
+            // clusters — and an always-empty People tab.
             for segment in result.segments {
                 let start = TimeInterval(segment.startTimeSeconds) + windowStart
                 let end = TimeInterval(segment.endTimeSeconds) + windowStart
-                var entry = entries[segment.speakerId] ?? Entry(embedding: [])
+                var entry = entries[segment.speakerId] ?? Entry()
                 entry.totalSpeech += end - start
                 if end - start > entry.longestTurnEnd - entry.longestTurnStart {
                     entry.longestTurnStart = start
                     entry.longestTurnEnd = end
                 }
-                entries[segment.speakerId] = entry
-            }
-            // The diarizer's database carries the up-to-date embedding per
-            // speaker; later windows refine earlier ones.
-            if let database = result.speakerDatabase {
-                for (speakerId, embedding) in database {
-                    entries[speakerId]?.embedding = embedding
+                if !segment.embedding.isEmpty {
+                    let weight = Float(max(0.1, end - start))
+                    if entry.embeddingSum.count != segment.embedding.count {
+                        entry.embeddingSum = [Float](repeating: 0, count: segment.embedding.count)
+                    }
+                    for i in segment.embedding.indices {
+                        entry.embeddingSum[i] += segment.embedding[i] * weight
+                    }
                 }
+                entries[segment.speakerId] = entry
             }
         }
 
         func finish() -> [SpeakerCluster] {
             entries.compactMap { key, entry in
-                guard !entry.embedding.isEmpty else { return nil }
+                guard !entry.embeddingSum.isEmpty else { return nil }
                 let turnLength = entry.longestTurnEnd - entry.longestTurnStart
                 let snippetLength = min(AppSettings.speakerSnippetDuration, turnLength)
                 let snippetStart = entry.longestTurnStart + (turnLength - snippetLength) / 2
                 return SpeakerCluster(
                     key: key,
-                    embedding: entry.embedding,
+                    embedding: VoiceEmbedding.normalized(entry.embeddingSum),
                     totalSpeech: entry.totalSpeech,
                     snippetStart: snippetStart,
                     snippetEnd: snippetStart + snippetLength

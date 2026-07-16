@@ -34,6 +34,42 @@ targets:
         product: WhisperKit
       - package: FluidAudio
         product: FluidAudio
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.shreyashg.echonotes
+        PRODUCT_NAME: EchoNotes
+        # Versioning contract: every PR to main bumps MARKETING_VERSION
+        # (minor for features, patch for fixes) and increments
+        # CURRENT_PROJECT_VERSION. Settings → About shows this next to the
+        # build's git commit.
+        MARKETING_VERSION: "1.1.0"
+        CURRENT_PROJECT_VERSION: "2"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: EchoNotes/Info.plist
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_PREVIEWS: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        SWIFT_EMIT_LOC_STRINGS: YES
+        SUPPORTS_MACCATALYST: NO
+        # The git-commit script below writes into the built product.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+    postBuildScripts:
+      - name: Embed Git Commit
+        basedOnDependencyAnalysis: false
+        script: |
+          # Stamp the built Info.plist with the source commit so Settings →
+          # About can link the running build to its exact code on GitHub.
+          # Runs before code signing (script phases precede signing), so the
+          # signature covers the stamped value. Falls back to "dev" when git
+          # isn't available (e.g. building from an exported source archive).
+          PLIST="${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
+          COMMIT=$(git -C "${SRCROOT}" rev-parse --short HEAD 2>/dev/null || echo dev)
+          if [ -f "${PLIST}" ]; then
+            /usr/libexec/PlistBuddy -c "Set :GitCommit ${COMMIT}" "${PLIST}" 2>/dev/null || \
+              /usr/libexec/PlistBuddy -c "Add :GitCommit string ${COMMIT}" "${PLIST}"
+          fi
 
   EchoNotesTests:
     type: bundle.unit-test
@@ -46,18 +82,3 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.shreyashg.echonotes.tests
         GENERATE_INFOPLIST_FILE: YES
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.shreyashg.echonotes
-        PRODUCT_NAME: EchoNotes
-        MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
-        TARGETED_DEVICE_FAMILY: "1,2"
-        GENERATE_INFOPLIST_FILE: NO
-        INFOPLIST_FILE: EchoNotes/Info.plist
-        CODE_SIGN_STYLE: Automatic
-        ENABLE_PREVIEWS: YES
-        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
-        SWIFT_EMIT_LOC_STRINGS: YES
-        SUPPORTS_MACCATALYST: NO
