@@ -1,8 +1,11 @@
 import SwiftUI
 import SwiftData
 
-/// Third tab: review new voices (card stack) and manage known people.
+/// People screen, presented as a sheet from the Notes tab: review new
+/// voices (card stack) and manage known people.
 struct PeopleView: View {
+    @Environment(\.dismiss) private var dismiss
+
     @Query(
         filter: SpeakerReviewItem.pendingPredicate,
         sort: \SpeakerReviewItem.createdAt,
@@ -27,6 +30,11 @@ struct PeopleView: View {
                 }
             }
             .navigationTitle("People")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
         }
     }
 

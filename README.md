@@ -3,7 +3,7 @@
 A native SwiftUI app for iPhone and iPad that does what the Plaud AI note taker does — without the extra hardware. Flip one switch and your device listens, transcribes, and turns conversations into organized notes (title, summary, key points, action items, tags). **Every AI model runs on-device.** No cloud, no account, no audio or transcript ever leaves your phone; the network is used only for one-time model downloads.
 
 - **Transcription:** an on-device Whisper model ([WhisperKit](https://github.com/argmaxinc/WhisperKit), Core ML) transcribes each session right after it ends, detecting the language automatically — Hindi, Spanish, English, German, French, Italian and ~95 more, including conversations that switch languages mid-stream
-- **Speaker recognition:** on-device diarization + voiceprints ([FluidAudio](https://github.com/FluidInference/FluidAudio), Core ML) tell voices apart; name a voice once in the People tab and it's tagged automatically in every future transcript
+- **Speaker recognition:** on-device diarization + voiceprints ([FluidAudio](https://github.com/FluidInference/FluidAudio), Core ML) tell voices apart; name a voice once on the People screen and it's tagged automatically in every future transcript
 - **Note generation:** Apple Foundation Models framework (the on-device Apple Intelligence LLM), with a NaturalLanguage-framework fallback when Apple Intelligence is unavailable
 - **Storage:** SwiftData + per-session `.m4a` audio files, all local
 
@@ -33,11 +33,10 @@ Then in Xcode:
 
 ## Using the app
 
-Three tabs:
+Two tabs:
 
 - **Record** — one big button. Turn it on and leave it on: the app keeps listening (including with the screen locked or the app in the background), waits for speech, and automatically cuts recordings into sessions when a long silence occurs. Each session becomes a note; while one is being transcribed, a progress card shows on this screen. The gear icon opens Settings, where you download the transcription + speaker models (one-time; the "Best" Whisper model is ~626 MB).
-- **Notes** — your library, newest first, grouped by day, searchable. Each note has three views: **Transcript** (timestamped, speaker-labeled, language-badged; tap a line to hear that moment), **Summary** (overview, key points, action items with owners' names, tags — regenerate anytime), and **Audio** (playback with scrubbing).
-- **People** — when a recording is processed, each new voice becomes a review card: play a ten-second sample and name the person (or tap "Me"). Named voices are recognized automatically from then on; you can rename, merge, or remove people anytime.
+- **Notes** — your library, newest first, grouped by day, searchable. Each note has three views: **Transcript** (timestamped, speaker-labeled, language-badged; tap a line to hear that moment), **Summary** (overview, key points, action items with owners' names, tags — regenerate anytime), and **Audio** (playback with scrubbing). The person icon in the top bar opens the **People** screen: when a recording is processed, each new voice becomes a review card — play a ten-second sample and name the person (or tap "Me"). Named voices are recognized automatically from then on; you can rename, merge, or remove people anytime. A red badge on the icon shows how many new voices are waiting.
 
 ### How transcription works
 

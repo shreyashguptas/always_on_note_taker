@@ -1,7 +1,7 @@
 import Foundation
 import SwiftData
 
-/// An unrecognized voice waiting for the user to name it in the People tab.
+/// An unrecognized voice waiting for the user to name it on the People screen.
 /// Created when enrichment finds a speaker whose voiceprint doesn't
 /// confidently match anyone known; resolved by assigning a person (existing
 /// or new) or dismissing it.

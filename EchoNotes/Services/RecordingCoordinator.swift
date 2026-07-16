@@ -434,7 +434,7 @@ final class RecordingCoordinator {
     /// session — Settings uses this to keep "Remove models" safe.
     var isEnrichmentActive: Bool { !enrichmentProgress.isEmpty }
 
-    /// The People tab's actions, routed through the one policy owner.
+    /// The People screen's actions, routed through the one policy owner.
     var speakerIdentityService: SpeakerIdentityService { speakerIdentity }
 
     // MARK: - Note generation

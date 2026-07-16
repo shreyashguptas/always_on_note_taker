@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Stable colors for speaker dots in transcripts and the People tab. Indexed
+/// Stable colors for speaker dots in transcripts and the People screen. Indexed
 /// by `Speaker.colorIndex` (wraps past eight speakers) or, for voices not
 /// yet identified, by their order of appearance in a session.
 enum SpeakerPalette {

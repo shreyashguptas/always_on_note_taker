@@ -56,7 +56,7 @@ device (iPhone 15 Pro or newer / M-series iPad) with Apple Intelligence enabled.
 
 ## Speaker recognition (models installed)
 - [ ] Record a 2–3 person conversation → transcript groups lines under "Speaker 1/2/3" with colored dots.
-- [ ] People tab badge shows the new-voice count; each card plays a ~10 s sample of the right voice.
+- [ ] The person icon in the Notes tab's top bar shows a red badge with the new-voice count; tapping it opens the People sheet, and each card plays a ~10 s sample of the right voice.
 - [ ] Naming a card (new name, "Me", or an existing person) immediately labels that speaker's lines in the transcript.
 - [ ] A voice named once is auto-tagged in the next recording without a new review card.
 - [ ] Two similar voices (e.g. siblings) are NOT silently cross-tagged — the borderline one shows an "Is this X?" card instead.

@@ -2,9 +2,6 @@ import SwiftUI
 import SwiftData
 
 struct RootTabView: View {
-    @Query(filter: SpeakerReviewItem.pendingPredicate)
-    private var pendingReviewItems: [SpeakerReviewItem]
-
     var body: some View {
         TabView {
             Tab("Record", systemImage: "waveform.circle.fill") {
@@ -14,11 +11,6 @@ struct RootTabView: View {
             Tab("Notes", systemImage: "note.text") {
                 NotesListView()
             }
-
-            Tab("People", systemImage: "person.2.fill") {
-                PeopleView()
-            }
-            .badge(pendingReviewItems.count)
         }
     }
 }

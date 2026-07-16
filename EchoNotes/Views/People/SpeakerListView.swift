@@ -11,7 +11,7 @@ struct SpeakerListView: View {
     @State private var renameText = ""
     @State private var deleting: Speaker?
     /// Recording counts fault every segment of every speaker — far too heavy
-    /// to recompute per render (the People tab re-renders while review cards
+    /// to recompute per render (the People screen re-renders while review cards
     /// animate), so they're computed per appearance.
     @State private var sessionCounts: [UUID: Int] = [:]
 

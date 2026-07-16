@@ -11,7 +11,7 @@ listens, cuts speech into sessions, transcribes each session **after it
 ends** with an on-device Whisper model (automatic language detection —
 Hindi, Spanish, English, German, French, Italian and ~95 more, including
 mid-conversation switches), tells voices apart with on-device diarization
-(name a voice once in the People tab → auto-tagged forever), and generates
+(name a voice once on the People screen → auto-tagged forever), and generates
 notes with Apple's on-device LLM.
 
 **Hard constraint:** every model runs on-device. The ONLY permitted network
@@ -24,7 +24,7 @@ audio/transcripts anywhere. Airplane mode is the acceptance test.
 | Path | What lives there |
 |---|---|
 | `project.yml` | XcodeGen spec — the `.xcodeproj` is NOT committed; regenerate after editing this |
-| `EchoNotes/App/` | `EchoNotesApp` (entry, DI), `RootTabView` (Record / Notes / People tabs) |
+| `EchoNotes/App/` | `EchoNotesApp` (entry, DI), `RootTabView` (Record / Notes tabs; People opens as a sheet from Notes) |
 | `EchoNotes/Models/` | SwiftData `@Model`s: `RecordingSession`, `TranscriptSegment`, `GeneratedNote`, `Speaker`, `SpeakerReviewItem` — schema assembled in `Support/Persistence.swift`; keep changes additive (lightweight migration only) |
 | `EchoNotes/Services/` | The pipeline. Capture: `AudioCaptureService` → `SessionPipeline` (VAD, pre-roll, per-session `.m4a`). Post-session: `TranscriptEnrichmentService` (WhisperKit + FluidAudio, windowed decode) → `SpeakerIdentityService` (voiceprint matching) → `SummarizationService` (FoundationModels, `FallbackSummarizer` when Apple Intelligence is unavailable). Orchestrated by `RecordingCoordinator`. Model downloads: `EnrichmentModelManager` |
 | `EchoNotes/Support/` | Pure helpers: `TranscriptFormatting` (canonical speaker numbering + language markers), `VoiceEmbedding` (cosine/running-mean), `SpeakerAttribution` (word→turn merge), `AppSettings` (all tunables) |

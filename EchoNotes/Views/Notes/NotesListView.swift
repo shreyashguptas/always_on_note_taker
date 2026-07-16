@@ -7,7 +7,11 @@ struct NotesListView: View {
     @Query(sort: \RecordingSession.startedAt, order: .reverse)
     private var sessions: [RecordingSession]
 
+    @Query(filter: SpeakerReviewItem.pendingPredicate)
+    private var pendingReviewItems: [SpeakerReviewItem]
+
     @State private var searchText = ""
+    @State private var showingPeople = false
 
     var body: some View {
         // Filter once per render; the grouping and empty-check share it.
@@ -29,7 +33,39 @@ struct NotesListView: View {
             }
             .navigationTitle("Notes")
             .searchable(text: $searchText, prompt: "Search titles, summaries, transcripts")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    peopleButton
+                }
+            }
+            .sheet(isPresented: $showingPeople) {
+                PeopleView()
+            }
         }
+    }
+
+    private var peopleButton: some View {
+        Button {
+            showingPeople = true
+        } label: {
+            Image(systemName: "person.2")
+                .overlay(alignment: .topTrailing) {
+                    if !pendingReviewItems.isEmpty {
+                        Text("\(pendingReviewItems.count)")
+                            .font(.caption2.bold())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(.red, in: Capsule())
+                            .offset(x: 10, y: -8)
+                    }
+                }
+        }
+        .accessibilityLabel(
+            pendingReviewItems.isEmpty
+                ? "People"
+                : "People, \(pendingReviewItems.count) new voices to review"
+        )
     }
 
     private func notesList(_ groups: [(day: Date, sessions: [RecordingSession])]) -> some View {

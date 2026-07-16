@@ -101,7 +101,7 @@ struct SettingsView: View {
         } header: {
             Text("Speaker recognition")
         } footer: {
-            Text("Tells voices apart, so transcripts show who said what. Name a voice once in the People tab and it's recognized automatically from then on. One-time download of roughly \(models.selectedVariant == .largeTurbo ? "700 MB" : "330 MB") total; models are stored on this device.")
+            Text("Tells voices apart, so transcripts show who said what. Name a voice once on the People screen (the person icon in Notes) and it's recognized automatically from then on. One-time download of roughly \(models.selectedVariant == .largeTurbo ? "700 MB" : "330 MB") total; models are stored on this device.")
         }
     }
 

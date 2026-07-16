@@ -14,7 +14,7 @@ enum PreviewData {
     static func seed(into context: ModelContext) {
         let calendar = Calendar.current
 
-        // Two known voices so the People tab and speaker-tagged transcripts
+        // Two known voices so the People screen and speaker-tagged transcripts
         // have something to show. (Preview embeddings are toy 4-dim vectors;
         // real ones are 256-dim.)
         let me = Speaker(name: "Me", isMe: true, embedding: [1, 0, 0, 0], colorIndex: 0)
@@ -83,7 +83,7 @@ enum PreviewData {
             context.insert(session)
         }
 
-        // One unknown voice awaiting review, so the People tab shows a card.
+        // One unknown voice awaiting review, so the People screen shows a card.
         let review = SpeakerReviewItem(
             sessionID: standup.id,
             speakerKey: "S3",

@@ -3,7 +3,7 @@ import SwiftData
 
 /// Decides who each diarized voice belongs to. Confident matches against the
 /// stored voiceprints are tagged automatically; everything else becomes a
-/// review card in the People tab. Owns all Speaker/SpeakerReviewItem
+/// review card on the People screen. Owns all Speaker/SpeakerReviewItem
 /// mutations so the matching policy lives in exactly one place.
 @MainActor
 final class SpeakerIdentityService {
