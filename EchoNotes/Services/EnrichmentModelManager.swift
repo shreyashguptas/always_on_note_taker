@@ -126,12 +126,17 @@ final class EnrichmentModelManager {
     }
 
     /// An enrichment job failed to load its models: whatever install state
-    /// we believed is stale (OS purged a cache, files vanished). Reset both
-    /// install flags' derived state so Settings shows the re-download
-    /// instead of a permanent "Installed" lie.
+    /// we believed is stale (OS purged a cache, files vanished or got
+    /// corrupted). Reset BOTH install flags so Settings shows the
+    /// re-download instead of a permanent "Installed" lie — a top-level
+    /// folder probe can't tell that files inside a .mlmodelc are gone.
+    /// Whisper files still on disk make the re-download cheap (only missing
+    /// files are fetched).
     func noteModelLoadFailure() {
         guard !isDownloading else { return }
         UserDefaults.standard.set(false, forKey: Self.diarizerInstalledKey)
+        UserDefaults.standard.set(false, forKey: Self.whisperInstalledKey)
+        UserDefaults.standard.removeObject(forKey: Self.legacyWhisperFolderKey)
         refreshInstalledState()
     }
 
@@ -148,7 +153,7 @@ final class EnrichmentModelManager {
     /// backgrounded), quietly pick it back up.
     func resumeInterruptedDownloads() {
         guard !isDownloading, whisperState != .ready else { return }
-        if downloader.hasPartialDownload {
+        if downloader.hasUnfinishedDownload {
             Task { await ensureModelsInstalled() }
         }
     }
@@ -170,6 +175,7 @@ final class EnrichmentModelManager {
         } else if whisperState != .ready {
             whisperModelFolder = installedWhisperFolder()
             whisperState = .ready
+            noteReadinessChange()
         }
     }
 
@@ -199,10 +205,22 @@ final class EnrichmentModelManager {
         diarizerState = .downloading(0)
 
         // The models are small (~80 MB); a background-task assertion buys
-        // enough time to finish even if the user backgrounds the app.
-        let assertion = UIApplication.shared.beginBackgroundTask(withName: "SpeakerModelDownload")
+        // enough time to finish even if the user backgrounds the app. The
+        // expiration handler MUST end the task itself, or the system kills
+        // the whole app when the grace window runs out on a slow network
+        // (the download then just fails and retries on foreground).
+        var assertion = UIBackgroundTaskIdentifier.invalid
+        assertion = UIApplication.shared.beginBackgroundTask(withName: "SpeakerModelDownload") {
+            if assertion != .invalid {
+                UIApplication.shared.endBackgroundTask(assertion)
+                assertion = .invalid
+            }
+        }
         defer {
-            if assertion != .invalid { UIApplication.shared.endBackgroundTask(assertion) }
+            if assertion != .invalid {
+                UIApplication.shared.endBackgroundTask(assertion)
+                assertion = .invalid
+            }
         }
 
         for attempt in 1...2 {
@@ -235,6 +253,15 @@ final class EnrichmentModelManager {
     /// fetches WhisperKit's tokenizer into its cache while the network is
     /// still available — so Airplane Mode works from the very first session.
     private func verifyWhisperInstall(_ folder: URL) async {
+        // A download can finish while the app is suspended — iOS relaunches
+        // us in the background to deliver it. Loading a >1 GB model there
+        // invites a jetsam kill; wait for the next foreground instead
+        // (`resumeInterruptedDownloads` lands back here — the download
+        // manifest survives until this verify succeeds).
+        guard UIApplication.shared.applicationState != .background else {
+            whisperState = .notDownloaded
+            return
+        }
         whisperState = .verifying
         do {
             let config = WhisperKitConfig(
@@ -245,6 +272,7 @@ final class EnrichmentModelManager {
             )
             _ = try await WhisperKit(config) // released immediately after the check
             UserDefaults.standard.set(true, forKey: Self.whisperInstalledKey)
+            downloader.clearManifest()
             whisperModelFolder = folder
             whisperState = .ready
             noteReadinessChange()

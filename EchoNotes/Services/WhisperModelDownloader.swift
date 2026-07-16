@@ -69,20 +69,19 @@ final class WhisperModelDownloader: NSObject, @unchecked Sendable {
     private var active = false
     private var failureReported = false
     private var lastReportedPermille = -1
+    /// Task identifiers we cancelled on purpose (failure cascade, reset,
+    /// stale-manifest cleanup) — their cancellation errors are expected and
+    /// must not fail an active download the user just restarted.
+    private var expectedCancellations: Set<Int> = []
 
     /// Stored when iOS relaunches the app for this session's events; called
     /// after the final event so the system can snapshot and suspend us again.
     private var backgroundEventsCompletionHandler: (() -> Void)?
 
-    private lazy var session: URLSession = {
-        let config = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
-        config.isDiscretionary = false
-        config.sessionSendsLaunchEvents = true
-        // Ceiling for one file including connectivity waits; a genuinely
-        // stalled transfer errors out instead of hanging forever.
-        config.timeoutIntervalForResource = 4 * 60 * 60
-        return URLSession(configuration: config, delegate: self, delegateQueue: nil)
-    }()
+    /// Created eagerly in init — a lazy var would race between the main
+    /// thread (background-events delivery) and the detached download task,
+    /// and two URLSessions on one background identifier is undefined.
+    private var session: URLSession!
 
     override private init() {
         super.init()
@@ -94,6 +93,13 @@ final class WhisperModelDownloader: NSObject, @unchecked Sendable {
             adoptManifestLocked(stored)
             lock.unlock()
         }
+        let config = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
+        config.isDiscretionary = false
+        config.sessionSendsLaunchEvents = true
+        // Ceiling for one file including connectivity waits; a genuinely
+        // stalled transfer errors out instead of hanging forever.
+        config.timeoutIntervalForResource = 4 * 60 * 60
+        session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }
 
     // MARK: - Public surface
@@ -104,13 +110,28 @@ final class WhisperModelDownloader: NSObject, @unchecked Sendable {
         return active
     }
 
-    /// A download was started at some point and hasn't finished: there's a
-    /// persisted manifest with files still missing. Used to auto-resume.
-    var hasPartialDownload: Bool {
+    /// A download was started at some point and its install hasn't been
+    /// confirmed: the manifest is still around (it's cleared by
+    /// `clearManifest()` only after the manager's verify-load succeeds).
+    /// Covers both "files still missing" and "all files down, verify never
+    /// ran (killed mid-verify)". Used to auto-resume.
+    var hasUnfinishedDownload: Bool {
         lock.lock()
         defer { lock.unlock() }
-        guard !manifest.isEmpty else { return false }
-        return manifest.contains { entryNeedsDownload($0) }
+        return !manifest.isEmpty
+    }
+
+    /// The install is confirmed good — forget the download bookkeeping so
+    /// auto-resume stops considering it.
+    func clearManifest() {
+        lock.lock()
+        manifest = []
+        remaining = []
+        inFlightBytes = [:]
+        completedBytes = 0
+        totalBytes = 0
+        lock.unlock()
+        try? FileManager.default.removeItem(at: manifestFileURL)
     }
 
     /// Fraction downloaded so far (byte-accurate), for seeding the UI when a
@@ -153,7 +174,20 @@ final class WhisperModelDownloader: NSObject, @unchecked Sendable {
         lastReportedPermille = -1
         lock.unlock()
         try? FileManager.default.removeItem(at: manifestFileURL)
-        session.getAllTasks { tasks in
+        cancelAllTasksExpectedly()
+    }
+
+    /// Cancels every task in the session, marking each cancellation as
+    /// deliberate so `didCompleteWithError` doesn't mistake it for a failure
+    /// of a download the user has since restarted.
+    private func cancelAllTasksExpectedly() {
+        session.getAllTasks { [weak self] tasks in
+            guard let self else { return }
+            self.lock.lock()
+            for task in tasks {
+                self.expectedCancellations.insert(task.taskIdentifier)
+            }
+            self.lock.unlock()
             tasks.forEach { $0.cancel() }
         }
     }
@@ -203,11 +237,12 @@ final class WhisperModelDownloader: NSObject, @unchecked Sendable {
 
         lock.lock()
         adoptManifestLocked(files)
-        let missing = remaining
+        let manifestPaths = Set(files.map(\.path))
+        let anythingMissing = !remaining.isEmpty
         let fraction = progressLocked()
         lock.unlock()
 
-        if missing.isEmpty {
+        if !anythingMissing {
             finishIfComplete()
             return
         }
@@ -218,15 +253,31 @@ final class WhisperModelDownloader: NSObject, @unchecked Sendable {
         let (_, _, downloads) = await session.tasks
         var inFlight: Set<String> = []
         for task in downloads where task.state == .running || task.state == .suspended {
-            if let path = task.taskDescription, missing.contains(path) {
+            if let path = task.taskDescription, manifestPaths.contains(path) {
                 inFlight.insert(path)
                 if task.state == .suspended { task.resume() }
             } else {
-                task.cancel() // stale task from a superseded manifest
+                // Stale task from a superseded manifest — a deliberate cancel.
+                lock.lock()
+                expectedCancellations.insert(task.taskIdentifier)
+                lock.unlock()
+                task.cancel()
             }
         }
 
-        for path in missing.subtracting(inFlight).sorted() {
+        // Re-derive under the lock AFTER the await: a surviving task can
+        // finish during it, and re-enqueueing its (now complete) file would
+        // double-count bytes and re-fire completion.
+        lock.lock()
+        let stillMissing = remaining.subtracting(inFlight)
+        let nothingLeft = remaining.isEmpty
+        lock.unlock()
+        if nothingLeft {
+            finishIfComplete()
+            return
+        }
+
+        for path in stillMissing.sorted() {
             guard let url = resolveURL(for: path) else {
                 fail("Couldn't build a download address for \(path).")
                 return
@@ -328,12 +379,15 @@ final class WhisperModelDownloader: NSObject, @unchecked Sendable {
 
     private func finishIfComplete() {
         lock.lock()
-        let done = remaining.isEmpty && !manifest.isEmpty && !failureReported
+        // `active` gates double-fires: replayed events after a relaunch (no
+        // startOrResume yet) and late duplicates both land here with
+        // active == false. The manifest is kept until the caller's
+        // verify-load confirms the install (clearManifest).
+        let done = active && remaining.isEmpty && !manifest.isEmpty && !failureReported
         if done { active = false }
         let folder = modelFolder
         lock.unlock()
         guard done else { return }
-        try? FileManager.default.removeItem(at: manifestFileURL)
         DispatchQueue.main.async { [weak self] in
             self?.onProgress?(1)
             self?.onFinished?(folder)
@@ -351,9 +405,7 @@ final class WhisperModelDownloader: NSObject, @unchecked Sendable {
         inFlightBytes = [:]
         lock.unlock()
         // Stop the rest of the fleet; completed files stay for the retry.
-        session.getAllTasks { tasks in
-            tasks.forEach { $0.cancel() }
-        }
+        cancelAllTasksExpectedly()
         DispatchQueue.main.async { [weak self] in
             self?.onFailed?(message)
         }
@@ -398,10 +450,12 @@ extension WhisperModelDownloader: URLSessionDownloadDelegate {
         lock.unlock()
         guard let expectedSize else { return } // stale task from an old manifest
 
+        // 206 happens when the system resumed the transfer after a
+        // connectivity drop; the exact-size check is the integrity gate.
         let status = (downloadTask.response as? HTTPURLResponse)?.statusCode ?? 0
         let attributes = try? FileManager.default.attributesOfItem(atPath: location.path)
         let actualSize = (attributes?[.size] as? NSNumber)?.int64Value ?? -1
-        guard status == 200, actualSize == expectedSize else {
+        guard (200...299).contains(status), actualSize == expectedSize else {
             fail("A model file didn't download correctly. Tap Retry to continue the download.")
             return
         }
@@ -431,7 +485,18 @@ extension WhisperModelDownloader: URLSessionDownloadDelegate {
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let error else { return } // success is handled in didFinishDownloadingTo
-        if (error as NSError).code == NSURLErrorCancelled { return } // our own cancel cascade
+
+        lock.lock()
+        inFlightBytes.removeValue(forKey: task.taskIdentifier)
+        let deliberate = expectedCancellations.remove(task.taskIdentifier) != nil
+        let idle = !active
+        lock.unlock()
+
+        if (error as NSError).code == NSURLErrorCancelled, deliberate || idle {
+            // Our own cancel cascade (failure/reset/stale cleanup) — not a
+            // failure of whatever download may since have been restarted.
+            return
+        }
         fail("The download was interrupted. Tap Retry to continue where it left off.")
     }
 
