@@ -16,6 +16,13 @@ final class VoiceActivityDetector {
     /// slowly (dB/sec) so speech doesn't drag the floor up.
     private var noiseFloorDB: Float = -60
     private let floorRisePerSecond: Float = 1.5
+    /// Rise rate while speech is being detected. Not zero — steady loud
+    /// noise misread as speech (an AC unit kicking in) must eventually be
+    /// reclassified or a session would never end — but ~15x slower, so a
+    /// dense conversation needs minutes of literally dip-free audio before
+    /// the floor could reach it, and any brief pause resets the floor
+    /// instantly anyway.
+    private let floorRisePerSecondDuringSpeech: Float = 0.1
     private var hangoverRemaining: TimeInterval = 0
 
     func process(_ buffer: AVAudioPCMBuffer) -> Reading {
@@ -30,15 +37,22 @@ final class VoiceActivityDetector {
 
         let bufferSeconds = Double(frameCount) / buffer.format.sampleRate
 
-        if db < noiseFloorDB {
-            noiseFloorDB = db
-        } else {
-            noiseFloorDB = min(db, noiseFloorDB + floorRisePerSecond * Float(bufferSeconds))
-        }
-        noiseFloorDB = max(noiseFloorDB, -80)
-
+        // Classify against the CURRENT floor before adapting it — the old
+        // order let a long steady conversation drag the floor up to its own
+        // level (1.5 dB/s) until the speaker was reclassified as background
+        // noise and the session ended mid-sentence.
         let threshold = max(noiseFloorDB + AppSettings.vadSpeechMarginDB, AppSettings.vadAbsoluteFloorDB)
         let rawSpeech = db > threshold
+
+        if db < noiseFloorDB {
+            // Quieter input drops the floor instantly, speech or not.
+            noiseFloorDB = max(db, -80)
+        } else {
+            let rate = (rawSpeech || hangoverRemaining > 0)
+                ? floorRisePerSecondDuringSpeech
+                : floorRisePerSecond
+            noiseFloorDB = min(db, noiseFloorDB + rate * Float(bufferSeconds))
+        }
 
         if rawSpeech {
             hangoverRemaining = AppSettings.vadHangover

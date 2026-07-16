@@ -4,6 +4,7 @@ struct RecordView: View {
     @Environment(RecordingCoordinator.self) private var coordinator
     @Environment(\.scenePhase) private var scenePhase
     @State private var isVisible = false
+    @State private var showsSettings = false
 
     var body: some View {
         NavigationStack {
@@ -29,13 +30,13 @@ struct RecordView: View {
 
                 Spacer()
 
-                if coordinator.state == .recording || !coordinator.liveFinalizedText.isEmpty {
-                    LiveTranscriptView(
-                        finalizedText: coordinator.liveFinalizedText,
-                        volatileText: coordinator.liveVolatileText
+                if let processing = processingStatus {
+                    StatusBanner(
+                        kind: .progress(processing.fraction),
+                        message: processing.message,
+                        linearProgress: true
                     )
-                    .frame(maxHeight: 180)
-                    .padding(.horizontal, 20)
+                    .padding(.horizontal, 24)
                     .padding(.bottom, 12)
                 }
 
@@ -46,6 +47,16 @@ struct RecordView: View {
             }
             .navigationTitle("EchoNotes")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Settings", systemImage: "gearshape") {
+                        showsSettings = true
+                    }
+                }
+            }
+            .sheet(isPresented: $showsSettings) {
+                SettingsView()
+            }
             // Waveform updates are pure UI; don't pay for them unless this
             // tab is visible AND the app is foreground. (scenePhase changes
             // reach retained-but-hidden tabs too, hence the isVisible check.)
@@ -96,12 +107,6 @@ struct RecordView: View {
             Text("Paused by the system")
                 .font(.title2.weight(.semibold))
                 .foregroundStyle(.orange)
-        case .error(let message):
-            Text(message)
-                .font(.headline)
-                .foregroundStyle(.red)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal)
         }
     }
 
@@ -109,13 +114,13 @@ struct RecordView: View {
     private var statusDetail: some View {
         switch coordinator.state {
         case .off:
-            Text("Turn on listening and EchoNotes will transcribe and organize everything it hears — entirely on this device.")
+            Text("Turn on listening and EchoNotes records what it hears, then transcribes and organizes it into notes — every language, entirely on this device.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
         case .listening:
-            Text("A note starts automatically when you speak. Recording continues with the screen locked.")
+            Text("A note starts automatically when you speak, even with the screen locked. The transcript is ready shortly after each conversation ends.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -129,6 +134,33 @@ struct RecordView: View {
         default:
             EmptyView()
         }
+    }
+
+    // MARK: - Post-session transcription status
+
+    private struct ProcessingStatus {
+        let message: String
+        /// nil = queued/indeterminate.
+        let fraction: Double?
+    }
+
+    /// What the transcription queue is doing right now, if anything — this
+    /// is where the live transcript used to sit, and it answers the same
+    /// question: "is the app working on my words?"
+    private var processingStatus: ProcessingStatus? {
+        let phases = coordinator.enrichmentProgress
+        guard !phases.isEmpty else { return nil }
+
+        // At most one job runs at a time; show its fraction when it has one.
+        let fraction: Double? = phases.values.compactMap {
+            if case .processing(let value) = $0 { return value }
+            return nil
+        }.first
+
+        let message = phases.count == 1
+            ? "Transcribing your last recording…"
+            : "Transcribing \(phases.count) recordings…"
+        return ProcessingStatus(message: message, fraction: fraction)
     }
 
     // MARK: - Banners
@@ -147,21 +179,33 @@ struct RecordView: View {
             }
         }
 
-        switch coordinator.speechModel.state {
-        case .checking:
-            StatusBanner(kind: .progress(nil), message: "Checking the on-device speech model…")
-        case .downloading(let fraction):
-            StatusBanner(kind: .progress(fraction), message: "Downloading the on-device speech model…")
-        case .failed(let message):
-            StatusBanner(kind: .warning, message: message)
-        case .unsupportedLocale:
-            StatusBanner(kind: .warning, message: "On-device transcription isn't available for your language yet.")
-        case .unknown, .ready:
-            EmptyView()
+        if let problem = coordinator.recordingProblemMessage {
+            StatusBanner(kind: .warning, message: problem)
+        }
+
+        // Transcription models are the app's engine now — surface their
+        // absence prominently rather than behind a dismissible hint.
+        if coordinator.enrichmentModels.isDownloading {
+            StatusBanner(kind: .progress(downloadFraction), message: "Downloading the transcription models…")
+        } else if !coordinator.enrichmentModels.isReady {
+            StatusBanner(
+                kind: .warning,
+                message: "Download the on-device models to transcribe recordings — Hindi, Spanish, English, German and ~95 more, plus who-said-what.",
+                actionTitle: "Set up"
+            ) {
+                showsSettings = true
+            }
         }
 
         if coordinator.isEnabled, let message = coordinator.aiUnavailabilityMessage {
             StatusBanner(kind: .info, message: message)
         }
+    }
+
+    private var downloadFraction: Double? {
+        if case .downloading(let fraction) = coordinator.enrichmentModels.whisperState {
+            return fraction
+        }
+        return nil
     }
 }

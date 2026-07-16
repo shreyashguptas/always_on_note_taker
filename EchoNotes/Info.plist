@@ -26,8 +26,6 @@
 	<false/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>EchoNotes listens through the microphone to record, transcribe, and summarize your conversations. Everything is processed entirely on this device and never leaves it.</string>
-	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>EchoNotes transcribes your recordings using on-device speech recognition. Audio and transcripts never leave your device.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

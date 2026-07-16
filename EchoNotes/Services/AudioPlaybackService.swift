@@ -18,11 +18,36 @@ final class AudioPlaybackService: NSObject, AVAudioPlayerDelegate {
 
     private var player: AVAudioPlayer?
     private var ticker: Timer?
+    /// When set, playback auto-pauses at this time (review-card snippets).
+    private var stopAt: TimeInterval?
+    private var interruptionObserver: NSObjectProtocol?
+
+    override init() {
+        super.init()
+        // A call/Siri pauses the AVAudioPlayer WITHOUT any delegate
+        // callback; without this the UI would show "playing" with a frozen
+        // clock and the ticker would run until manually paused.
+        interruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] notification in
+            let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+            guard raw.flatMap(AVAudioSession.InterruptionType.init(rawValue:)) == .began else { return }
+            Task { @MainActor [weak self] in
+                guard let self, self.isPlaying else { return }
+                self.pause()
+            }
+        }
+    }
 
     deinit {
         // Normally .onDisappear stops playback first; this catches teardown
         // paths that skip it so the repeating timer can't outlive the service.
         ticker?.invalidate()
+        if let interruptionObserver {
+            NotificationCenter.default.removeObserver(interruptionObserver)
+        }
     }
 
     func load(url: URL) {
@@ -68,11 +93,15 @@ final class AudioPlaybackService: NSObject, AVAudioPlayerDelegate {
     func pause() {
         player?.pause()
         isPlaying = false
+        // A snippet boundary must not survive the pause and ambush a later
+        // plain play().
+        stopAt = nil
         stopTicker()
     }
 
     func seek(to time: TimeInterval) {
         guard let player else { return }
+        stopAt = nil
         player.currentTime = max(0, min(time, duration))
         currentTime = player.currentTime
     }
@@ -83,6 +112,14 @@ final class AudioPlaybackService: NSObject, AVAudioPlayerDelegate {
         if !isPlaying { play() }
     }
 
+    /// Plays just `start...end`, pausing automatically at the end — how
+    /// review cards audition a voice without clipping out snippet files.
+    func playRange(from start: TimeInterval, to end: TimeInterval) {
+        seek(to: start)
+        stopAt = max(start, end)
+        if !isPlaying { play() }
+    }
+
     func stop() {
         player?.stop()
         player = nil
@@ -90,6 +127,7 @@ final class AudioPlaybackService: NSObject, AVAudioPlayerDelegate {
         isLoaded = false
         duration = 0
         currentTime = 0
+        stopAt = nil
         stopTicker()
     }
 
@@ -97,12 +135,20 @@ final class AudioPlaybackService: NSObject, AVAudioPlayerDelegate {
 
     private func startTicker() {
         stopTicker()
-        ticker = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, let player = self.player else { return }
                 self.currentTime = player.currentTime
+                if let stopAt = self.stopAt, player.currentTime >= stopAt {
+                    self.pause()
+                }
             }
         }
+        // .common, not default: the default mode is suspended while the user
+        // scrolls, which would freeze progress and blow through a snippet's
+        // auto-stop boundary.
+        RunLoop.main.add(timer, forMode: .common)
+        ticker = timer
     }
 
     private func stopTicker() {
@@ -116,6 +162,7 @@ final class AudioPlaybackService: NSObject, AVAudioPlayerDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.isPlaying = false
+            self.stopAt = nil
             // Rewind the player itself, not just the published time, so the
             // next play() starts from the beginning instead of the end.
             self.player?.currentTime = 0

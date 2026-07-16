@@ -13,6 +13,12 @@ struct NoteRowView: View {
                 if session.isProcessing {
                     ProgressView()
                         .controlSize(.small)
+                } else if session.status == .failed {
+                    // A failed, transcript-less recording must not look like
+                    // a normal finished note.
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .font(.caption)
                 }
             }
 
@@ -50,7 +56,7 @@ struct NoteRowView: View {
     private var statusText: String {
         switch session.status {
         case .recording: "Recording…"
-        case .transcribing: "Transcribing…"
+        case .transcribing, .enriching: "Transcribing…"
         case .summarizing: "Summarizing…"
         case .complete, .failed: ""
         }

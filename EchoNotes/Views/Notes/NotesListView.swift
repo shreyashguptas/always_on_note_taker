@@ -3,6 +3,7 @@ import SwiftData
 
 struct NotesListView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(RecordingCoordinator.self) private var coordinator
     @Query(sort: \RecordingSession.startedAt, order: .reverse)
     private var sessions: [RecordingSession]
 
@@ -82,6 +83,12 @@ struct NotesListView: View {
 
     private func delete(_ toDelete: [RecordingSession]) {
         for session in toDelete {
+            // A session still being recorded can't be deleted out from under
+            // the audio writer — it becomes deletable the moment it ends.
+            guard session.status != .recording else { continue }
+            // Stops any in-flight processing of this recording and drops
+            // pending voice-review cards that play audio from its file.
+            coordinator.sessionWillBeDeleted(session.id)
             Persistence.deleteAudioFile(named: session.audioFileName)
             modelContext.delete(session)
         }
@@ -92,4 +99,5 @@ struct NotesListView: View {
 #Preview {
     NotesListView()
         .modelContainer(PreviewData.container)
+        .environment(RecordingCoordinator(modelContext: PreviewData.container.mainContext))
 }
