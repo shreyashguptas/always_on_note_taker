@@ -6,8 +6,10 @@ import SwiftData
 final class RecordingSession {
     enum Status: String, Codable {
         case recording      // audio is being captured right now
-        case transcribing   // capture ended, transcript still finalizing
-        case enriching      // multilingual + speaker pass over the audio file
+        /// Legacy (pre-Whisper live transcription); kept so rows stored by
+        /// older builds still decode and recover. New sessions never enter it.
+        case transcribing
+        case enriching      // multilingual + speaker transcription of the audio file
         case summarizing    // transcript done, AI note generation running
         case complete
         case failed

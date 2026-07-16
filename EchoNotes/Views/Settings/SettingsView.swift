@@ -45,9 +45,9 @@ struct SettingsView: View {
 
             statusRow(title: "Language model", state: models.whisperState)
         } header: {
-            Text("Multilingual transcription")
+            Text("Transcription")
         } footer: {
-            Text("After each recording, an on-device Whisper model re-transcribes the audio, detecting the language as it goes — Hindi, Spanish, English, German, French, Italian and ~95 more — even when a conversation switches between them.")
+            Text("Recordings are transcribed after each session by an on-device Whisper model that detects the language as it goes — Hindi, Spanish, English, German, French, Italian and ~95 more — even when a conversation switches between them.")
         }
     }
 
@@ -57,7 +57,12 @@ struct SettingsView: View {
 
             if !models.isReady {
                 Button {
-                    Task { await models.ensureModelsInstalled() }
+                    Task {
+                        await models.ensureModelsInstalled()
+                        // Recordings made before the download were parked
+                        // audio-only; transcribe them now.
+                        coordinator.transcribeBacklog()
+                    }
                 } label: {
                     Label(
                         models.isDownloading ? "Downloading…" : "Download models",

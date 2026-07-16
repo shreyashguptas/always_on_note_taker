@@ -3,62 +3,8 @@ import Foundation
 import Observation
 import SwiftData
 
-/// Thread-safe map of session id → live transcription service. Buffers arrive
-/// on the pipeline queue; the coordinator manages lifecycles on the main
-/// actor. Services are created lazily on the first buffer of a session so the
-/// pre-roll is never missed.
-final class TranscriptionRegistry {
-    private let lock = NSLock()
-    private var services: [UUID: TranscriptionService] = [:]
-    private var locale: Locale = .current
-    /// When live transcription can't run (no on-device model for the user's
-    /// language), audio still records and the post-session pass transcribes;
-    /// this just stops per-session services from being created.
-    private var liveEnabled = true
-    /// Configures callbacks on a freshly created service. Set once by the
-    /// coordinator before capture ever starts; invoked on the pipeline queue.
-    var configure: ((UUID, TranscriptionService) -> Void)?
-
-    func setLocale(_ locale: Locale) {
-        lock.lock()
-        self.locale = locale
-        lock.unlock()
-    }
-
-    func setLiveTranscriptionEnabled(_ enabled: Bool) {
-        lock.lock()
-        liveEnabled = enabled
-        lock.unlock()
-    }
-
-    func feed(id: UUID, buffer: AVAudioPCMBuffer) {
-        lock.lock()
-        guard liveEnabled || services[id] != nil else {
-            lock.unlock()
-            return
-        }
-        var service = services[id]
-        if service == nil {
-            let created = TranscriptionService(locale: locale)
-            services[id] = created
-            service = created
-            lock.unlock()
-            configure?(id, created)
-        } else {
-            lock.unlock()
-        }
-        service?.enqueue(buffer)
-    }
-
-    func remove(id: UUID) -> TranscriptionService? {
-        lock.lock()
-        defer { lock.unlock() }
-        return services.removeValue(forKey: id)
-    }
-}
-
 /// The app's engine room: owns the capture service, the session pipeline, and
-/// per-session transcription, reacts to interruptions, and persists sessions
+/// post-session transcription, reacts to interruptions, and persists sessions
 /// to SwiftData. Lives on the main actor; audio-thread work stays inside the
 /// services it owns.
 @MainActor
@@ -86,32 +32,18 @@ final class RecordingCoordinator {
     private(set) var currentSessionStartedAt: Date?
     /// Why AI summaries are degraded right now, if they are (checked at enable).
     private(set) var aiUnavailabilityMessage: String?
-    /// Set when live transcription can't run for the user's language; the
-    /// post-session pass still transcribes everything.
-    private(set) var liveTranscriptUnavailableMessage: String?
-    /// Per-session progress of the multilingual/speaker pass, for row UI.
+    /// Per-session progress of the transcription pass, for row/banner UI.
     private(set) var enrichmentProgress: [UUID: TranscriptEnrichmentService.Phase] = [:]
 
-    /// Live transcript of the in-flight session.
-    private(set) var liveFinalizedText = ""
-    private(set) var liveVolatileText = ""
-
-    let speechModel = SpeechModelManager()
     let enrichmentModels = EnrichmentModelManager()
 
     private let capture = AudioCaptureService()
     private let pipeline = SessionPipeline()
-    private let transcriptions = TranscriptionRegistry()
     private let enrichment = TranscriptEnrichmentService()
     private let speakerIdentity: SpeakerIdentityService
     private let modelContext: ModelContext
     private var resumeTask: Task<Void, Never>?
     private var activeSessionID: UUID?
-    /// Monotonic per-session segment indices; avoids faulting the whole
-    /// segments relationship just to count it on every append (including the
-    /// end-of-session burst after a session stops being "active").
-    private var segmentCounters: [UUID: Int] = [:]
-    private var lastSegmentSave = Date.distantPast
 
     init(modelContext: ModelContext) {
         self.modelContext = modelContext
@@ -125,17 +57,6 @@ final class RecordingCoordinator {
         }
         pipeline.emit = { [weak self] event in
             self?.handlePipelineEvent(event)
-        }
-        pipeline.speechSink = { [transcriptions] id, buffer in
-            transcriptions.feed(id: id, buffer: buffer)
-        }
-        transcriptions.configure = { [weak self] id, service in
-            service.onVolatileText = { text in
-                self?.updateVolatileText(text, for: id)
-            }
-            service.onFinalSegment = { segment in
-                self?.appendSegment(segment, to: id)
-            }
         }
 
         enrichment.onProgress = { [weak self] id, phase in
@@ -152,6 +73,7 @@ final class RecordingCoordinator {
         // enable() can create a live session.
         Task { [weak self] in
             self?.recoverInterruptedSessions()
+            self?.transcribeBacklog()
         }
     }
 
@@ -181,41 +103,13 @@ final class RecordingCoordinator {
         }
         guard isEnabled else { return } // toggled off while the dialog was up
 
-        await speechModel.ensureModelInstalled()
-        guard isEnabled else { return } // toggled off during the download
-
-        // Refresh first: the degraded-mode copy below depends on whether the
-        // enrichment models are installed.
+        // Recording never blocks on the transcription models: sessions
+        // captured before they're downloaded are kept and transcribed once
+        // they are (Retry on the note, or automatically on relaunch).
         enrichmentModels.refreshInstalledState()
-
-        // Live transcription is a nice-to-have now that the post-session
-        // pass produces the authoritative transcript: when the live model
-        // can't run (a Hindi-locale device, a failed download), recording
-        // continues without it rather than blocking.
-        switch speechModel.state {
-        case .ready:
-            liveTranscriptUnavailableMessage = nil
-            transcriptions.setLiveTranscriptionEnabled(true)
-            transcriptions.setLocale(speechModel.locale)
-        case .unsupportedLocale:
-            transcriptions.setLiveTranscriptionEnabled(false)
-            liveTranscriptUnavailableMessage = degradedLiveMessage(problem: "Live transcription isn't available for your language.")
-        default:
-            transcriptions.setLiveTranscriptionEnabled(false)
-            liveTranscriptUnavailableMessage = degradedLiveMessage(problem: "The live speech model isn't available.")
-        }
         aiUnavailabilityMessage = SummarizationService.unavailabilityMessage
 
         startCaptureOrRetry()
-    }
-
-    /// Honest degraded-mode copy: only promise a post-session transcript
-    /// when the models that produce it are actually installed.
-    private func degradedLiveMessage(problem: String) -> String {
-        if enrichmentModels.isReady {
-            return problem + " Recordings are transcribed right after each session instead."
-        }
-        return problem + " Download the multilingual models in Settings so recordings can be transcribed after each session."
     }
 
     private func disable() {
@@ -223,8 +117,6 @@ final class RecordingCoordinator {
         resumeTask?.cancel()
         resumeTask = nil
         currentSessionStartedAt = nil
-        liveFinalizedText = ""
-        liveVolatileText = ""
         pipeline.stop(reason: .manualStop) { [weak self] in
             // If the user re-enabled before this deferred stop landed, the
             // fresh engine must not be torn down by the old disable.
@@ -326,30 +218,22 @@ final class RecordingCoordinator {
             modelContext.insert(session)
             try? modelContext.save()
             activeSessionID = id
-            segmentCounters[id] = 0
             currentSessionStartedAt = startedAt
-            liveFinalizedText = ""
-            liveVolatileText = ""
             if isEnabled { state = .recording }
 
         case .sessionEnded(let id, let fileName, let duration, let endedAt, _, let discarded):
             if activeSessionID == id {
                 activeSessionID = nil
                 currentSessionStartedAt = nil
-                liveFinalizedText = ""
-                liveVolatileText = ""
                 // Only the *active* session's end returns the UI to listening;
                 // a late event from an interrupted session must not clobber a
                 // newer session's state.
                 if isEnabled, state == .recording { state = .listening }
             }
 
-            let service = transcriptions.remove(id: id)
             let session = fetchSession(id: id)
 
             if discarded || session == nil {
-                service?.cancel()
-                segmentCounters.removeValue(forKey: id)
                 Persistence.deleteAudioFile(named: fileName)
                 if let session {
                     modelContext.delete(session)
@@ -360,34 +244,24 @@ final class RecordingCoordinator {
 
             session?.endedAt = endedAt
             session?.duration = duration
-            session?.status = .transcribing
             try? modelContext.save()
 
-            Task { [weak self] in
-                await service?.finishAndWait()
-                self?.finalizeSession(id: id)
-            }
+            finalizeSession(id: id)
         }
     }
 
-    /// Called after the last transcript segment has been persisted.
+    /// The session's audio file is closed: hand it to transcription, or park
+    /// it retryable when the models aren't downloaded yet.
     private func finalizeSession(id: UUID) {
-        segmentCounters.removeValue(forKey: id)
         guard let session = fetchSession(id: id) else { return }
 
-        // The multilingual/speaker pass runs whenever its models are here —
-        // even when the live transcript came up empty, because speech in an
-        // unsupported language produces no live segments at all.
         if startEnrichmentIfPossible(for: session) { return }
 
+        // Kept, not deleted: the audio is fully transcribable later — the
+        // note offers Retry once the models are downloaded.
         session.enrichmentState = .skipped
-        if session.segments.isEmpty {
-            // Nothing intelligible was said; keep the recording but mark it done.
-            session.status = .complete
-            try? modelContext.save()
-            return
-        }
-        summarize(session)
+        session.status = .complete
+        try? modelContext.save()
     }
 
     // MARK: - Post-session enrichment (multilingual transcript + speakers)
@@ -418,6 +292,23 @@ final class RecordingCoordinator {
     func retryEnrichment(for session: RecordingSession) {
         guard session.status == .complete || session.status == .failed else { return }
         _ = startEnrichmentIfPossible(for: session)
+    }
+
+    /// Transcribes recordings that were captured before the models were
+    /// downloaded (parked as skipped, audio kept). Called at launch and
+    /// after a download completes, so the backlog clears itself — no
+    /// note-by-note Retry hunting.
+    func transcribeBacklog() {
+        guard enrichmentModels.isReady else { return }
+        let skipped = RecordingSession.EnrichmentState.skipped.rawValue
+        let complete = RecordingSession.Status.complete.rawValue
+        let descriptor = FetchDescriptor<RecordingSession>(predicate: #Predicate {
+            $0.enrichmentStateRaw == skipped && $0.statusRaw == complete
+        })
+        guard let parked = try? modelContext.fetch(descriptor) else { return }
+        for session in parked where session.segments.isEmpty {
+            _ = startEnrichmentIfPossible(for: session)
+        }
     }
 
     /// The pass succeeded end-to-end: replace the preliminary transcript
@@ -537,11 +428,13 @@ final class RecordingCoordinator {
     // MARK: - Launch recovery
 
     /// Sessions left mid-flight by a crash, force-quit, or kill are recovered:
-    /// their incrementally persisted segments become the transcript, and note
-    /// generation is re-run. Sessions caught mid-enrichment restart the pass
-    /// from the top — speaker-cluster identities can't survive a process
-    /// death, and re-running is cheap next to a wrong who-said-what. Empty
-    /// leftovers with no audio are removed.
+    /// transcription is re-run whenever it can be (a mid-pass death restarts
+    /// the pass from the top — speaker-cluster identities can't survive a
+    /// process death, and re-running is cheap next to a wrong who-said-what);
+    /// otherwise whatever transcript exists gets its note. Only leftovers
+    /// with no usable audio and no transcript are removed. The "transcribing"
+    /// status is legacy (pre-Whisper live transcription) kept so upgraders'
+    /// mid-flight sessions still recover.
     func recoverInterruptedSessions() {
         let recording = RecordingSession.Status.recording.rawValue
         let transcribing = RecordingSession.Status.transcribing.rawValue
@@ -567,10 +460,9 @@ final class RecordingCoordinator {
             if startEnrichmentIfPossible(for: session) { continue }
 
             if segments.isEmpty {
-                // No transcript — but the audio may still be transcribable
-                // later (live transcription can be legitimately disabled and
-                // the enrichment models merely not downloaded yet). Only a
-                // session with nothing to recover from is deleted.
+                // No transcript — but the audio is transcribable once the
+                // models are downloaded. Only a session with nothing to
+                // recover from is deleted.
                 if let audioSeconds = Self.readableAudioSeconds(of: session.audioFileURL),
                    audioSeconds >= AppSettings.minimumSessionDuration {
                     if session.duration == 0 { session.duration = audioSeconds }
@@ -597,43 +489,6 @@ final class RecordingCoordinator {
                 let result = await SummarizationService.generateNote(from: session.attributedTranscript)
                 self.attachNote(result, to: id)
             }
-        }
-    }
-
-    // MARK: - Transcription callbacks (main queue)
-
-    private func updateVolatileText(_ text: String, for id: UUID) {
-        guard id == activeSessionID else { return }
-        liveVolatileText = text
-    }
-
-    private func appendSegment(_ segment: TranscriptionService.Segment, to id: UUID) {
-        guard let session = fetchSession(id: id) else { return }
-
-        let index = segmentCounters[id] ?? session.segments.count
-        segmentCounters[id] = index + 1
-        let stored = TranscriptSegment(
-            index: index,
-            text: segment.text,
-            startTime: segment.startTime,
-            endTime: segment.endTime
-        )
-        modelContext.insert(stored)
-        stored.session = session
-        session.appendToTranscriptPreview(segment.text)
-
-        // Persist at most every few seconds — enough for crash recovery
-        // without a disk commit per spoken sentence. (Session end always
-        // saves explicitly.)
-        if Date.now.timeIntervalSince(lastSegmentSave) > 3 {
-            try? modelContext.save()
-            lastSegmentSave = .now
-        }
-
-        if id == activeSessionID {
-            liveFinalizedText = liveFinalizedText.isEmpty
-                ? segment.text
-                : liveFinalizedText + " " + segment.text
         }
     }
 

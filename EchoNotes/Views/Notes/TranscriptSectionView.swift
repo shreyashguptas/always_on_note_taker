@@ -26,9 +26,12 @@ struct TranscriptSectionView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     if session.status == .enriching {
+                        // Only reachable when a finished transcript is being
+                        // re-processed (Retry) — fresh sessions have no
+                        // segments to show until transcription completes.
                         StatusBanner(
                             kind: .progress(enrichmentFraction),
-                            message: "Preliminary transcript — languages and speakers are being worked out…"
+                            message: "Re-transcribing this recording — the transcript will update when it finishes…"
                         )
                     }
                     ForEach(Array(segments.enumerated()), id: \.element.persistentModelID) { position, segment in

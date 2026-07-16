@@ -5,8 +5,6 @@ struct RecordView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var isVisible = false
     @State private var showsSettings = false
-    /// One-time nudge toward downloading the multilingual/speaker models.
-    @AppStorage("multilingualBannerDismissed") private var multilingualBannerDismissed = false
 
     var body: some View {
         NavigationStack {
@@ -32,14 +30,10 @@ struct RecordView: View {
 
                 Spacer()
 
-                if coordinator.state == .recording || !coordinator.liveFinalizedText.isEmpty {
-                    LiveTranscriptView(
-                        finalizedText: coordinator.liveFinalizedText,
-                        volatileText: coordinator.liveVolatileText
-                    )
-                    .frame(maxHeight: 180)
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 12)
+                if let processing = processingStatus {
+                    ProcessingCard(status: processing)
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 12)
                 }
 
                 WaveformView(levels: coordinator.levels, active: coordinator.isEnabled)
@@ -122,13 +116,13 @@ struct RecordView: View {
     private var statusDetail: some View {
         switch coordinator.state {
         case .off:
-            Text("Turn on listening and EchoNotes will transcribe and organize everything it hears — entirely on this device.")
+            Text("Turn on listening and EchoNotes records what it hears, then transcribes and organizes it into notes — every language, entirely on this device.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
         case .listening:
-            Text("A note starts automatically when you speak. Recording continues with the screen locked.")
+            Text("A note starts automatically when you speak, even with the screen locked. The transcript is ready shortly after each conversation ends.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -141,6 +135,58 @@ struct RecordView: View {
                 .padding(.horizontal, 40)
         default:
             EmptyView()
+        }
+    }
+
+    // MARK: - Post-session transcription status
+
+    private struct ProcessingStatus {
+        let message: String
+        /// nil = queued/indeterminate.
+        let fraction: Double?
+    }
+
+    /// What the transcription queue is doing right now, if anything — this
+    /// is where the live transcript used to sit, and it answers the same
+    /// question: "is the app working on my words?"
+    private var processingStatus: ProcessingStatus? {
+        let phases = coordinator.enrichmentProgress
+        guard !phases.isEmpty else { return nil }
+
+        // At most one job runs at a time; show its fraction when it has one.
+        let fraction: Double? = phases.values.compactMap {
+            if case .processing(let value) = $0 { return value }
+            return nil
+        }.first
+
+        let message = phases.count == 1
+            ? "Transcribing your last recording…"
+            : "Transcribing \(phases.count) recordings…"
+        return ProcessingStatus(message: message, fraction: fraction)
+    }
+
+    private struct ProcessingCard: View {
+        let status: ProcessingStatus
+
+        var body: some View {
+            HStack(spacing: 12) {
+                Image(systemName: "text.bubble")
+                    .foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(status.message)
+                        .font(.footnote.weight(.medium))
+                    if let fraction = status.fraction {
+                        ProgressView(value: fraction)
+                            .progressViewStyle(.linear)
+                    } else {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(14)
+            .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
         }
     }
 
@@ -160,36 +206,29 @@ struct RecordView: View {
             }
         }
 
-        switch coordinator.speechModel.state {
-        case .checking:
-            StatusBanner(kind: .progress(nil), message: "Checking the on-device speech model…")
-        case .downloading(let fraction):
-            StatusBanner(kind: .progress(fraction), message: "Downloading the on-device speech model…")
-        case .unknown, .ready, .failed, .unsupportedLocale:
-            // Live-model problems no longer block recording; the message
-            // below explains the degraded live view instead.
-            EmptyView()
-        }
-
-        if coordinator.isEnabled, let message = coordinator.liveTranscriptUnavailableMessage {
-            StatusBanner(kind: .info, message: message)
+        // Transcription models are the app's engine now — surface their
+        // absence prominently rather than behind a dismissible hint.
+        if coordinator.enrichmentModels.isDownloading {
+            StatusBanner(kind: .progress(downloadFraction), message: "Downloading the transcription models…")
+        } else if !coordinator.enrichmentModels.isReady {
+            StatusBanner(
+                kind: .warning,
+                message: "Download the on-device models to transcribe recordings — Hindi, Spanish, English, German and ~95 more, plus who-said-what.",
+                actionTitle: "Set up"
+            ) {
+                showsSettings = true
+            }
         }
 
         if coordinator.isEnabled, let message = coordinator.aiUnavailabilityMessage {
             StatusBanner(kind: .info, message: message)
         }
+    }
 
-        if !coordinator.enrichmentModels.isReady,
-           !coordinator.enrichmentModels.isDownloading,
-           !multilingualBannerDismissed {
-            StatusBanner(
-                kind: .info,
-                message: "Download the multilingual models to get Hindi, Spanish, German (and more) transcription plus who-said-what in every note.",
-                actionTitle: "Set up"
-            ) {
-                multilingualBannerDismissed = true
-                showsSettings = true
-            }
+    private var downloadFraction: Double? {
+        if case .downloading(let fraction) = coordinator.enrichmentModels.whisperState {
+            return fraction
         }
+        return nil
     }
 }

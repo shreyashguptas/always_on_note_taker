@@ -3,14 +3,14 @@ import Foundation
 import Observation
 import WhisperKit
 
-/// Downloads and tracks the two model sets that post-session enrichment
-/// needs: a multilingual Whisper model (WhisperKit, Core ML) and the speaker
+/// Downloads and tracks the two model sets that transcription needs: a
+/// multilingual Whisper model (WhisperKit, Core ML) and the speaker
 /// diarization models (FluidAudio, Core ML). Both are one-time downloads,
-/// after which everything runs on-device — the same deal as the Apple speech
-/// model that `SpeechModelManager` installs.
+/// after which everything runs on-device.
 ///
-/// Unlike the live speech model, these are OPTIONAL: when they're absent the
-/// app records and transcribes exactly like v1, and enrichment is skipped.
+/// Their absence never blocks recording: sessions captured before the
+/// download are kept audio-only and transcribed later via Retry (or
+/// automatically at next launch).
 @MainActor
 @Observable
 final class EnrichmentModelManager {

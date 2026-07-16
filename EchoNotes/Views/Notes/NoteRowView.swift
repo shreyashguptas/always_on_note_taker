@@ -56,8 +56,7 @@ struct NoteRowView: View {
     private var statusText: String {
         switch session.status {
         case .recording: "Recording…"
-        case .transcribing: "Transcribing…"
-        case .enriching: "Processing transcript…"
+        case .transcribing, .enriching: "Transcribing…"
         case .summarizing: "Summarizing…"
         case .complete, .failed: ""
         }

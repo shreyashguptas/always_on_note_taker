@@ -5,12 +5,13 @@ device (iPhone 15 Pro or newer / M-series iPad) with Apple Intelligence enabled.
 
 ## First launch
 - [ ] App launches to the Record tab with the big Off button.
-- [ ] Turning the toggle on prompts for microphone access; allowing it moves to "Listening for speech".
-- [ ] If the speech model isn't installed yet, a download banner with progress appears and listening starts when it finishes.
+- [ ] A "Download the on-device models" banner shows until the transcription models are installed; "Set up" opens Settings.
+- [ ] Turning the toggle on prompts for microphone access; allowing it moves to "Listening for speech" (recording works even before the models are downloaded).
+- [ ] Recordings made BEFORE the model download are transcribed automatically right after the download completes (and on next launch).
 
 ## Core loop
-- [ ] Speak for ~30 seconds → status becomes "Recording" with a running timer; live transcript streams (dimmed text firms up as it finalizes).
-- [ ] Turn the toggle off → within a few seconds the note appears in the Notes tab with a title, overview, key points, tags ⭐ (basic summary otherwise).
+- [ ] Speak for ~30 seconds → status becomes "Recording" with a running timer (no live transcript — transcription runs after the session).
+- [ ] Turn the toggle off → the "Transcribing your last recording…" progress card appears on the Record tab, then the note appears in the Notes tab with a transcript, title, overview, key points, tags ⭐ (basic summary otherwise).
 - [ ] Note detail: Transcript shows timestamped lines; tapping a timestamp plays audio from that moment; Audio tab scrubs and changes speed.
 
 ## Always-on behavior
@@ -24,25 +25,23 @@ device (iPhone 15 Pro or newer / M-series iPad) with Apple Intelligence enabled.
 - [ ] Enable Airplane Mode (after the one-time model download) → recording, transcription, and note generation all still work.
 
 ## Recovery & edge cases
-- [ ] Force-quit the app mid-recording, relaunch → the interrupted session appears as a note built from what was already transcribed (or is cleaned up if nothing was said).
+- [ ] Force-quit the app mid-recording, relaunch → the interrupted session's audio is kept and transcribed (or cleaned up if it holds under ~5 s of audio).
 - [ ] A brief noise (< 5 s of speech) does not create a note.
 - [ ] Deleting a note removes it from the list (and its audio file from disk), plus any pending voice-review cards from that recording.
 - [ ] Deny mic permission → Record tab shows the warning banner with a working Settings shortcut.
 - [ ] On a non-Apple-Intelligence device: notes still generate via the basic summarizer and the info banner explains why.
 
-## Multilingual + speaker models (Settings)
-- [ ] Record tab shows the one-time "Download the multilingual models" banner; "Set up" opens Settings.
-- [ ] Settings → Download models shows progress for the language model; both rows flip to "Installed".
+## Transcription + speaker models (Settings)
+- [ ] Settings → Download models shows progress for the language model; both rows flip to "Installed"; the Record tab banner disappears.
 - [ ] Kill the app mid-download, reopen, download again → completes (or resumes) without a corrupt state.
 - [ ] Switch the model picker between Best and Compact → the other variant shows "Not downloaded" until fetched.
-- [ ] Remove downloaded models → rows return to "Not downloaded"; recording still works like v1 (enrichment skipped).
+- [ ] Remove downloaded models → rows return to "Not downloaded"; recording still works (sessions parked audio-only until models return); removal is blocked while a recording is being transcribed.
 
 ## Multilingual transcription (models installed)
-- [ ] Record a session switching languages in ~1-minute blocks (e.g. Hindi → English → Spanish) → after "Processing transcript…", segments carry the right text per language; non-dominant languages get a capsule badge (e.g. "Hindi").
+- [ ] Record a session switching languages in ~1-minute blocks (e.g. Hindi → English → Spanish) → after "Transcribing…", segments carry the right text per language; non-dominant languages get a capsule badge (e.g. "Hindi").
 - [ ] Devanagari (and any accented text) renders correctly and stays selectable in the transcript.
-- [ ] Tap a timestamp on an enriched segment → playback starts at that moment (Whisper timestamps line up with the audio).
-- [ ] On a device set to an unsupported language (e.g. Hindi locale): recording is NOT blocked; an info banner explains live transcription is off; the post-session transcript still arrives.
-- [ ] While a session is being processed, the note row shows "Processing transcript…" and the transcript view shows the preliminary banner; both clear when done.
+- [ ] Tap a timestamp on a transcript line → playback starts at that moment (Whisper timestamps line up with the audio).
+- [ ] While a session is being transcribed, the Record tab shows the progress card and the note row shows "Transcribing…"; both clear when done.
 - [ ] Summary of a multilingual recording is written in English and doesn't invent content for the non-English parts ⭐.
 
 ## Speaker recognition (models installed)
@@ -54,8 +53,9 @@ device (iPhone 15 Pro or newer / M-series iPad) with Apple Intelligence enabled.
 - [ ] Rename / merge / remove in People behaves: merge moves all lines to the kept person; remove reverts lines to "Speaker n".
 - [ ] Action items name the responsible speaker when the transcript makes it clear ⭐.
 
-## Enrichment robustness
+## Transcription robustness
 - [ ] 30+ minute session: processing completes; watch Instruments → memory stays flat across windows (chunked decode), no thermal runaway (processing pauses if the device gets hot).
 - [ ] Force-quit mid-processing, relaunch → the session re-processes from the start and ends with a single, non-duplicated transcript.
-- [ ] Enrichment failure (e.g. delete the audio file mid-flight in a debug build) → note falls back to the preliminary transcript and the detail view offers Retry.
+- [ ] Transcription failure (e.g. corrupt the audio file in a debug build) → the recording is kept, the row shows a warning icon, and the detail view offers Retry once the cause is fixed.
+- [ ] Delete a note while it's being transcribed → processing stops (no zombie CPU burn), later recordings still get transcribed.
 - [ ] Airplane-mode proof again AFTER installing the models: recording, multilingual transcription, speaker tagging, and notes all work offline.
