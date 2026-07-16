@@ -47,6 +47,32 @@ final class TranscriptEnrichmentService {
         case processing(Double)
     }
 
+    /// Why a pass failed — typed so the coordinator can persist it, the UI
+    /// can explain it next to Retry, and model problems can heal install
+    /// state. The copy lives here with the reason, in one place.
+    enum FailureReason: String {
+        case modelLoadFailed
+        case unreadableAudio
+        case emptyAudio
+        case decodeFailed
+        case transcriptionFailed
+
+        var userMessage: String {
+            switch self {
+            case .modelLoadFailed:
+                "The transcription models couldn't be loaded. Re-download them in Settings, then retry."
+            case .unreadableAudio:
+                "This recording's audio file couldn't be read."
+            case .emptyAudio:
+                "This recording's audio file is empty."
+            case .decodeFailed:
+                "The audio couldn't be decoded partway through."
+            case .transcriptionFailed:
+                "Transcription failed partway through. Retry to run it again."
+            }
+        }
+    }
+
     struct Job {
         let sessionID: UUID
         let audioURL: URL
@@ -61,19 +87,13 @@ final class TranscriptEnrichmentService {
     /// transcript atomically. A failure partway through must never cost the
     /// transcript the session already has.
     var onFinished: ((UUID, [EnrichedSegment], [SpeakerCluster]) -> Void)?
-    var onFailed: ((UUID, String) -> Void)?
+    var onFailed: ((UUID, FailureReason) -> Void)?
 
     private let lock = NSLock()
     private var queue: [Job] = []
     private var worker: Task<Void, Never>?
     /// Sessions whose jobs should stop (their note was deleted).
     private var cancelled: Set<UUID> = []
-
-    var isProcessing: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return worker != nil
-    }
 
     // Engines live only while the queue is non-empty. Touched exclusively by
     // the single worker task; the drain/unload happens under the lock (see
@@ -163,7 +183,7 @@ final class TranscriptEnrichmentService {
         do {
             diarizer = try await loadEngines(job)
         } catch {
-            dispatchFailed(job.sessionID, "The processing models couldn't be loaded. You can retry from the note.")
+            dispatchFailed(job.sessionID, .modelLoadFailed)
             return
         }
 
@@ -171,7 +191,7 @@ final class TranscriptEnrichmentService {
         do {
             file = try AVAudioFile(forReading: job.audioURL)
         } catch {
-            dispatchFailed(job.sessionID, "The recording's audio file couldn't be read.")
+            dispatchFailed(job.sessionID, .unreadableAudio)
             return
         }
 
@@ -179,7 +199,7 @@ final class TranscriptEnrichmentService {
         let totalFrames = file.length
         let totalSeconds = Double(totalFrames) / sampleRate
         guard totalSeconds > 0 else {
-            dispatchFailed(job.sessionID, "The recording's audio file is empty.")
+            dispatchFailed(job.sessionID, .emptyAudio)
             return
         }
 
@@ -190,14 +210,15 @@ final class TranscriptEnrichmentService {
 
         while windowStart < totalSeconds {
             if isCancelled(job.sessionID) { return }
-            await waitWhileThermallyConstrained()
+            await waitWhileThermallyConstrained(sessionID: job.sessionID)
+            if isCancelled(job.sessionID) { return }
 
             let windowSeconds = min(AppSettings.enrichmentWindowSeconds, totalSeconds - windowStart)
             let samples: [Float]
             do {
                 samples = try decoder.readWindow(seconds: windowSeconds)
             } catch {
-                dispatchFailed(job.sessionID, "The recording's audio couldn't be decoded.")
+                dispatchFailed(job.sessionID, .decodeFailed)
                 return
             }
             if samples.isEmpty { break }
@@ -221,7 +242,7 @@ final class TranscriptEnrichmentService {
             do {
                 allSegments += try await transcribeWindow(samples, windowStart: windowStart, turns: turns)
             } catch {
-                dispatchFailed(job.sessionID, "Transcription failed partway through. You can retry from the note.")
+                dispatchFailed(job.sessionID, .transcriptionFailed)
                 return
             }
 
@@ -333,12 +354,19 @@ final class TranscriptEnrichmentService {
 
     // MARK: - Thermal backoff
 
-    /// Enrichment is deferrable by definition; never fight a hot phone.
-    private func waitWhileThermallyConstrained() async {
-        while true {
+    /// Enrichment is deferrable by definition; never fight a hot phone. A
+    /// cancelled session must not keep the (single, serial) worker parked
+    /// here for the rest of the thermal event, and a cancelled task must
+    /// exit rather than busy-spin on a sleep that no longer sleeps.
+    private func waitWhileThermallyConstrained(sessionID: UUID) async {
+        while !isCancelled(sessionID) {
             let state = ProcessInfo.processInfo.thermalState
             if state != .serious && state != .critical { return }
-            try? await Task.sleep(for: .seconds(30))
+            do {
+                try await Task.sleep(for: .seconds(30))
+            } catch {
+                return
+            }
         }
     }
 
@@ -408,9 +436,9 @@ final class TranscriptEnrichmentService {
         DispatchQueue.main.async { onFinished(id, segments, clusters) }
     }
 
-    private func dispatchFailed(_ id: UUID, _ message: String) {
+    private func dispatchFailed(_ id: UUID, _ reason: FailureReason) {
         guard let onFailed else { return }
-        DispatchQueue.main.async { onFailed(id, message) }
+        DispatchQueue.main.async { onFailed(id, reason) }
     }
 }
 

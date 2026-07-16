@@ -31,9 +31,13 @@ struct RecordView: View {
                 Spacer()
 
                 if let processing = processingStatus {
-                    ProcessingCard(status: processing)
-                        .padding(.horizontal, 24)
-                        .padding(.bottom, 12)
+                    StatusBanner(
+                        kind: .progress(processing.fraction),
+                        message: processing.message,
+                        linearProgress: true
+                    )
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 12)
                 }
 
                 WaveformView(levels: coordinator.levels, active: coordinator.isEnabled)
@@ -103,12 +107,6 @@ struct RecordView: View {
             Text("Paused by the system")
                 .font(.title2.weight(.semibold))
                 .foregroundStyle(.orange)
-        case .error(let message):
-            Text(message)
-                .font(.headline)
-                .foregroundStyle(.red)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal)
         }
     }
 
@@ -165,31 +163,6 @@ struct RecordView: View {
         return ProcessingStatus(message: message, fraction: fraction)
     }
 
-    private struct ProcessingCard: View {
-        let status: ProcessingStatus
-
-        var body: some View {
-            HStack(spacing: 12) {
-                Image(systemName: "text.bubble")
-                    .foregroundStyle(Color.accentColor)
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(status.message)
-                        .font(.footnote.weight(.medium))
-                    if let fraction = status.fraction {
-                        ProgressView(value: fraction)
-                            .progressViewStyle(.linear)
-                    } else {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .padding(14)
-            .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
-        }
-    }
-
     // MARK: - Banners
 
     @ViewBuilder
@@ -204,6 +177,10 @@ struct RecordView: View {
                     UIApplication.shared.open(url)
                 }
             }
+        }
+
+        if let problem = coordinator.recordingProblemMessage {
+            StatusBanner(kind: .warning, message: problem)
         }
 
         // Transcription models are the app's engine now — surface their

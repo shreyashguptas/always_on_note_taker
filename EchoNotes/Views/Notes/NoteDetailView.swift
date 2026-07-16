@@ -14,9 +14,18 @@ struct NoteDetailView: View {
 
     @State private var section: Section = .summary
     @State private var playback = AudioPlaybackService()
+    /// Whether the audio is present AND readable — probed once per
+    /// appearance (it opens the file, too heavy for every render).
+    @State private var audioIsUsable = false
 
     var body: some View {
         VStack(spacing: 0) {
+            if session.enrichmentState == .failed, let message = session.enrichmentFailureMessage {
+                StatusBanner(kind: .warning, message: message)
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+            }
+
             Picker("Section", selection: $section) {
                 ForEach(Section.allCases) { section in
                     Text(section.rawValue).tag(section)
@@ -47,25 +56,36 @@ struct NoteDetailView: View {
                 }
             }
         }
+        .onAppear {
+            audioIsUsable = Self.probeAudio(of: session)
+        }
+        .onChange(of: session.enrichmentStateRaw) { _, _ in
+            audioIsUsable = Self.probeAudio(of: session)
+        }
         .onDisappear {
             playback.stop()
         }
     }
 
-    /// Offer a re-run when the multilingual/speaker pass failed or never
-    /// ran — but only when it can actually run now (models installed, audio
-    /// still on disk), so the button never silently does nothing.
+    /// Offer a re-run when the transcription pass failed or never ran — but
+    /// only when it can actually run now (models installed, audio readable),
+    /// so the button never silently does nothing. Uses the same probe as
+    /// the coordinator's enqueue gate.
     private var showsRetry: Bool {
         guard session.status == .complete || session.status == .failed else { return false }
         switch session.enrichmentState {
         case .failed, .skipped, .none:
-            guard coordinator.enrichmentModels.isReady,
-                  let url = session.audioFileURL,
-                  FileManager.default.fileExists(atPath: url.path) else { return false }
-            return true
+            return coordinator.enrichmentModels.isReady && audioIsUsable
         case .pending, .done:
             return false
         }
+    }
+
+    private static func probeAudio(of session: RecordingSession) -> Bool {
+        guard let seconds = RecordingCoordinator.readableAudioSeconds(of: session.audioFileURL) else {
+            return false
+        }
+        return seconds >= AppSettings.minimumSessionDuration
     }
 
     /// Tapping a transcript timestamp starts playback at that moment.

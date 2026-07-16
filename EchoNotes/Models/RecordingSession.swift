@@ -40,6 +40,9 @@ final class RecordingSession {
     var transcriptPreview: String
     /// See EnrichmentState. Defaulted so pre-upgrade rows migrate lightly.
     var enrichmentStateRaw: String = EnrichmentState.none.rawValue
+    /// TranscriptEnrichmentService.FailureReason raw value when the last
+    /// pass failed — shown next to Retry so the user knows what to fix.
+    var enrichmentFailureReasonRaw: String?
 
     @Relationship(deleteRule: .cascade, inverse: \TranscriptSegment.session)
     var segments: [TranscriptSegment]
@@ -70,10 +73,24 @@ final class RecordingSession {
         set { enrichmentStateRaw = newValue.rawValue }
     }
 
+    /// User-facing explanation of the last transcription failure, if any.
+    var enrichmentFailureMessage: String? {
+        enrichmentFailureReasonRaw
+            .flatMap(TranscriptEnrichmentService.FailureReason.init(rawValue:))?
+            .userMessage
+    }
+
     /// Resolved location of this session's recording, when one exists.
     var audioFileURL: URL? {
         guard let audioFileName, !audioFileName.isEmpty else { return nil }
         return Persistence.audioURL(forFileName: audioFileName)
+    }
+
+    /// The one home for the fetch-by-id descriptor.
+    static func fetch(id: UUID, in context: ModelContext) -> RecordingSession? {
+        var descriptor = FetchDescriptor<RecordingSession>(predicate: #Predicate { $0.id == id })
+        descriptor.fetchLimit = 1
+        return try? context.fetch(descriptor).first
     }
 
     var sortedSegments: [TranscriptSegment] {
@@ -84,35 +101,14 @@ final class RecordingSession {
         sortedSegments.map(\.text).joined(separator: " ")
     }
 
-    /// Most common segment language in this recording, when known.
-    var dominantLanguageCode: String? {
-        Self.dominantLanguageCode(of: segments)
-    }
-
     static func dominantLanguageCode(of segments: [TranscriptSegment]) -> String? {
-        var counts: [String: Int] = [:]
-        for segment in segments {
-            if let code = segment.languageCode {
-                counts[code, default: 0] += 1
-            }
-        }
-        return counts.max { $0.value < $1.value }?.key
+        TranscriptFormatting.dominantLanguage(of: segments.lazy.map(\.languageCode))
     }
 
-    /// THE canonical "Speaker n" numbering: every diarized cluster gets a
-    /// number by first appearance in transcript order, whether or not it was
-    /// later resolved to a named person. The transcript UI and the
-    /// summarizer input must both use this map — independent numbering
-    /// would let a note's "Speaker 2: book flights" point at a different
-    /// voice than the transcript's "Speaker 2" header.
+    /// Canonical "Speaker n" numbering — see TranscriptFormatting, which
+    /// both the transcript UI and the summarizer input share.
     static func speakerNumbersByFirstAppearance(of segments: [TranscriptSegment]) -> [String: Int] {
-        var numbers: [String: Int] = [:]
-        for segment in segments {
-            if let key = segment.speakerKey, numbers[key] == nil {
-                numbers[key] = numbers.count + 1
-            }
-        }
-        return numbers
+        TranscriptFormatting.speakerNumbers(forKeysInOrder: segments.lazy.map(\.speakerKey))
     }
 
     /// Transcript with one line per segment, prefixed with the speaker's name
@@ -121,43 +117,27 @@ final class RecordingSession {
     /// the form the summarizer consumes so action items can name people.
     /// Falls back to the plain transcript when nothing is attributed.
     var attributedTranscript: String {
-        let segments = sortedSegments
-        let hasAttribution = segments.contains { $0.speaker != nil || $0.speakerKey != nil || $0.languageCode != nil }
-        guard hasAttribution else { return fullTranscript }
-
-        let dominant = Self.dominantLanguageCode(of: segments)
-        let speakerNumbers = Self.speakerNumbersByFirstAppearance(of: segments)
-        return segments.map { segment in
-            var line = ""
-            if let code = segment.languageCode, code != dominant {
-                line += "[\(code)] "
-            }
-            if let name = segment.speaker?.name, !name.isEmpty {
-                line += "\(name): "
-            } else if let key = segment.speakerKey, let number = speakerNumbers[key] {
-                line += "Speaker \(number): "
-            }
-            return line + segment.text
-        }
-        .joined(separator: "\n")
+        TranscriptFormatting.attributedText(sortedSegments.map {
+            TranscriptFormatting.Line(
+                text: $0.text,
+                languageCode: $0.languageCode,
+                speakerKey: $0.speakerKey,
+                speakerName: $0.speaker?.name
+            )
+        })
     }
 
     // MARK: - Transcript preview (denormalized for search/list rows)
 
-    /// Single home for the preview-building policy, shared by the live
-    /// transcription path (incremental) and the enrichment path (rebuild).
-    func appendToTranscriptPreview(_ text: String) {
-        guard transcriptPreview.count < AppSettings.transcriptPreviewLength else { return }
-        let combined = transcriptPreview.isEmpty ? text : transcriptPreview + " " + text
-        transcriptPreview = String(combined.prefix(AppSettings.transcriptPreviewLength))
-    }
-
+    /// Single home for the preview-building policy: the first ~500
+    /// characters of the transcript, space-joined.
     func rebuildTranscriptPreview(from texts: [String]) {
-        transcriptPreview = ""
+        var preview = ""
         for text in texts {
-            if transcriptPreview.count >= AppSettings.transcriptPreviewLength { break }
-            appendToTranscriptPreview(text)
+            if preview.count >= AppSettings.transcriptPreviewLength { break }
+            preview = preview.isEmpty ? text : preview + " " + text
         }
+        transcriptPreview = String(preview.prefix(AppSettings.transcriptPreviewLength))
     }
 
     /// Title to show in lists: the generated one when available, otherwise a

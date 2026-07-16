@@ -13,13 +13,32 @@ struct StatusBanner: View {
     let message: String
     var actionTitle: String? = nil
     var action: (() -> Void)? = nil
+    /// Progress banners only: render a linear bar under the message instead
+    /// of the circular spinner (used for longer-running work like
+    /// transcription).
+    var linearProgress = false
 
     var body: some View {
         HStack(spacing: 12) {
             leading
-            Text(message)
-                .font(.footnote)
+            if case .progress(let fraction) = kind, linearProgress {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(message)
+                        .font(.footnote.weight(.medium))
+                    if let fraction {
+                        ProgressView(value: fraction)
+                            .progressViewStyle(.linear)
+                    } else {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
                 .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Text(message)
+                    .font(.footnote)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             if let actionTitle, let action {
                 Button(actionTitle, action: action)
                     .font(.footnote.weight(.semibold))
@@ -41,7 +60,12 @@ struct StatusBanner: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
         case .progress(let fraction):
-            if let fraction {
+            if linearProgress {
+                // The linear bar under the message is the indicator; a
+                // second spinner up front would be noise.
+                Image(systemName: "text.bubble")
+                    .foregroundStyle(Color.accentColor)
+            } else if let fraction {
                 ProgressView(value: fraction)
                     .progressViewStyle(.circular)
                     .controlSize(.small)

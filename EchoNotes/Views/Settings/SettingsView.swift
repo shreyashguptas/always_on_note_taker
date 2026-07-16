@@ -17,6 +17,13 @@ struct SettingsView: View {
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
+            // Switching to an already-installed variant makes the pass ready
+            // without a download completing — sweep parked recordings then too.
+            .onChange(of: models.selectedVariant) { _, _ in
+                if models.isReady {
+                    coordinator.transcribeBacklog()
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
@@ -70,7 +77,12 @@ struct SettingsView: View {
                     )
                 }
                 .disabled(models.isDownloading)
-            } else {
+            }
+
+            // Gated on ANY variant's files, not the selected one's — after
+            // switching the picker to an uninstalled variant, the previous
+            // 626 MB download must still be removable.
+            if models.anyVariantInstalled, !models.isDownloading {
                 Button(role: .destructive) {
                     models.deleteDownloadedModels()
                 } label: {
@@ -112,8 +124,6 @@ struct SettingsView: View {
             Text(title)
             Spacer()
             switch state {
-            case .unknown, .checking:
-                ProgressView().controlSize(.small)
             case .downloading(let fraction):
                 if let fraction {
                     ProgressView(value: fraction)

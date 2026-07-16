@@ -99,4 +99,16 @@ final class SpeakerReviewItem {
             : linkedOccurrencesRaw + "\n" + line
         occurrenceCount += 1
     }
+
+    /// Rewrites the full occurrence list; the first entry becomes the
+    /// card's primary (session deletion re-anchors cards this way).
+    func setOccurrences(_ occurrences: [(sessionID: UUID, speakerKey: String)]) {
+        guard let first = occurrences.first else { return }
+        sessionID = first.sessionID
+        speakerKey = first.speakerKey
+        linkedOccurrencesRaw = occurrences.dropFirst()
+            .map { "\($0.sessionID.uuidString)|\($0.speakerKey)" }
+            .joined(separator: "\n")
+        occurrenceCount = occurrences.count
+    }
 }

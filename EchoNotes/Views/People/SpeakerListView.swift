@@ -10,6 +10,10 @@ struct SpeakerListView: View {
     @State private var renaming: Speaker?
     @State private var renameText = ""
     @State private var deleting: Speaker?
+    /// Recording counts fault every segment of every speaker — far too heavy
+    /// to recompute per render (the People tab re-renders while review cards
+    /// animate), so they're computed per appearance.
+    @State private var sessionCounts: [UUID: Int] = [:]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -20,6 +24,8 @@ struct SpeakerListView: View {
                 }
             }
         }
+        .onAppear { rebuildCounts() }
+        .onChange(of: speakers.count) { _, _ in rebuildCounts() }
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 16))
         .alert("Rename", isPresented: Binding(
             get: { renaming != nil },
@@ -62,12 +68,7 @@ struct SpeakerListView: View {
                     Text(speaker.name)
                         .font(.body.weight(.medium))
                     if speaker.isMe {
-                        Text("Me")
-                            .font(.caption2.weight(.semibold))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 1)
-                            .background(Color.accentColor.opacity(0.15), in: .capsule)
-                            .foregroundStyle(Color.accentColor)
+                        TagChipView(tag: "Me")
                     }
                 }
                 Text(sessionCountText(speaker))
@@ -101,12 +102,15 @@ struct SpeakerListView: View {
         .padding(.vertical, 10)
     }
 
+    private func rebuildCounts() {
+        sessionCounts = Dictionary(uniqueKeysWithValues: speakers.map { ($0.id, $0.sessionCount) })
+    }
+
     private func sessionCountText(_ speaker: Speaker) -> String {
-        let count = speaker.sessionCount
-        switch count {
+        switch sessionCounts[speaker.id] ?? 0 {
         case 0: return "Not in any recordings yet"
         case 1: return "In 1 recording"
-        default: return "In \(count) recordings"
+        case let count: return "In \(count) recordings"
         }
     }
 }

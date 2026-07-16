@@ -16,8 +16,15 @@ final class SpeakerIdentityService {
     // MARK: - Post-enrichment entry point
 
     /// Called once per enriched session with every distinct voice found.
-    /// Auto-tags confident matches, queues the rest for review.
-    func processClusters(_ clusters: [TranscriptEnrichmentService.SpeakerCluster], sessionID: UUID) {
+    /// Auto-tags confident matches, queues the rest for review. Returns the
+    /// names it assigned (cluster key → person name) so the caller can label
+    /// the transcript without re-faulting the just-inserted segments.
+    @discardableResult
+    func processClusters(
+        _ clusters: [TranscriptEnrichmentService.SpeakerCluster],
+        sessionID: UUID
+    ) -> [String: String] {
+        var assignedNames: [String: String] = [:]
         let speakers = allSpeakers()
         // Mutable so cards created for earlier clusters of THIS call are
         // seen by later clusters — the diarizer sometimes splits one voice
@@ -37,6 +44,7 @@ final class SpeakerIdentityService {
                match.margin >= AppSettings.speakerMatchMargin {
                 tagSegments(sessionID: sessionID, speakerKey: cluster.key, with: best)
                 fold(embedding, into: best)
+                assignedNames[cluster.key] = best.name
                 continue
             }
 
@@ -63,6 +71,7 @@ final class SpeakerIdentityService {
             pending.append(item)
         }
         try? modelContext.save()
+        return assignedNames
     }
 
     // MARK: - Review actions
@@ -198,15 +207,47 @@ final class SpeakerIdentityService {
         return (used.max() ?? -1) + 1
     }
 
-    /// Removes pending cards pointing at a session being deleted — their
-    /// snippet audio is about to disappear.
+    /// A session is being deleted: scrub it out of the review queue without
+    /// losing voices that were also heard elsewhere. Cards whose only
+    /// occurrence was this session go away; cards with occurrences in other
+    /// sessions survive, re-anchored to one of those sessions (with a
+    /// snippet recomputed from that session's segments) when their snippet
+    /// audio belonged to the deleted one.
     func purgeReviewItems(for sessionID: UUID) {
-        let descriptor = FetchDescriptor<SpeakerReviewItem>(predicate: #Predicate {
-            $0.sessionID == sessionID
-        })
-        guard let items = try? modelContext.fetch(descriptor) else { return }
-        for item in items where item.status == .pending {
-            modelContext.delete(item)
+        for item in pendingReviewItems() {
+            let remaining = item.allOccurrences.filter { $0.sessionID != sessionID }
+            if remaining.isEmpty {
+                modelContext.delete(item)
+                continue
+            }
+            guard remaining.count != item.allOccurrences.count else { continue } // untouched
+
+            let primaryChanged = item.sessionID != remaining[0].sessionID
+            item.setOccurrences(remaining)
+            if primaryChanged {
+                // The snippet range referred to the deleted session's audio;
+                // find this voice's longest stretch in the new primary.
+                let snippet = longestSegmentRange(sessionID: item.sessionID, speakerKey: item.speakerKey)
+                item.snippetStart = snippet?.start ?? 0
+                item.snippetEnd = snippet?.end ?? 0
+            }
         }
+        try? modelContext.save()
+    }
+
+    /// Midpoint window of the longest transcript segment this cluster spoke
+    /// in the given session — a serviceable review snippet when the original
+    /// one is gone.
+    private func longestSegmentRange(sessionID: UUID, speakerKey: String) -> (start: TimeInterval, end: TimeInterval)? {
+        let descriptor = FetchDescriptor<TranscriptSegment>(predicate: #Predicate {
+            $0.session?.id == sessionID && $0.speakerKey == speakerKey
+        })
+        guard let segments = try? modelContext.fetch(descriptor),
+              let longest = segments.max(by: { ($0.endTime - $0.startTime) < ($1.endTime - $1.startTime) }) else {
+            return nil
+        }
+        let length = min(AppSettings.speakerSnippetDuration, longest.endTime - longest.startTime)
+        let start = longest.startTime + ((longest.endTime - longest.startTime) - length) / 2
+        return (start, start + length)
     }
 }

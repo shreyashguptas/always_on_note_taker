@@ -7,8 +7,30 @@ struct TranscriptSectionView: View {
 
     @Environment(RecordingCoordinator.self) private var coordinator
 
+    /// Sorting + numbering a multi-thousand-segment transcript is too heavy
+    /// to redo on every render (progress ticks re-render this view while a
+    /// recording is being re-transcribed), so the derived data is cached and
+    /// refreshed only when the segment set changes size.
+    @State private var segments: [TranscriptSegment] = []
+    @State private var dominantLanguage: String?
+    @State private var speakerNumbers: [String: Int] = [:]
+
     var body: some View {
-        let segments = session.sortedSegments
+        content
+            .onAppear { rebuildDerivedData() }
+            .onChange(of: session.segments.count) { _, _ in rebuildDerivedData() }
+    }
+
+    private func rebuildDerivedData() {
+        segments = session.sortedSegments
+        dominantLanguage = RecordingSession.dominantLanguageCode(of: segments)
+        // Canonical numbering shared with attributedTranscript, so the
+        // note's "Speaker 2" is the same voice as the UI's "Speaker 2".
+        speakerNumbers = RecordingSession.speakerNumbersByFirstAppearance(of: segments)
+    }
+
+    @ViewBuilder
+    private var content: some View {
         if segments.isEmpty {
             ContentUnavailableView(
                 session.isProcessing ? "Transcribing…" : "No transcript",
@@ -18,11 +40,6 @@ struct TranscriptSectionView: View {
                     : "No speech was transcribed for this recording.")
             )
         } else {
-            let dominantLanguage = RecordingSession.dominantLanguageCode(of: segments)
-            // Canonical numbering shared with attributedTranscript, so the
-            // note's "Speaker 2" is the same voice as the UI's "Speaker 2".
-            let speakerNumbers = RecordingSession.speakerNumbersByFirstAppearance(of: segments)
-
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     if session.status == .enriching {

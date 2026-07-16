@@ -9,7 +9,7 @@ import Foundation
 /// All internal state is confined to a private serial queue. Events are
 /// delivered on the main queue.
 final class SessionPipeline {
-    enum EndReason: String {
+    enum EndReason {
         case silence
         case maxDuration
         case manualStop
@@ -20,7 +20,11 @@ final class SessionPipeline {
         /// Mic level for the waveform (~12 Hz, one per tap buffer).
         case level(Float)
         case sessionStarted(id: UUID, fileName: String, startedAt: Date)
-        case sessionEnded(id: UUID, fileName: String, duration: TimeInterval, endedAt: Date, reason: EndReason, discarded: Bool)
+        case sessionEnded(id: UUID, fileName: String, duration: TimeInterval, endedAt: Date, discarded: Bool)
+        /// Speech was detected but the session's audio file couldn't be
+        /// created (disk full, missing directory) — audio is being lost.
+        /// Throttled; the UI should surface it.
+        case sessionStartFailed
     }
 
     /// Delivered on the main queue.
@@ -55,6 +59,10 @@ final class SessionPipeline {
     }
 
     private var active: ActiveSession?
+    /// Audio-clock throttle for sessionStartFailed events: VAD re-triggers a
+    /// failed start on every speech buffer, but one banner per half-minute
+    /// is plenty.
+    private var secondsSinceStartFailure: TimeInterval = .infinity
 
     // MARK: - Gate
 
@@ -113,6 +121,7 @@ final class SessionPipeline {
                 endActiveSession(reason: .maxDuration)
             }
         } else if reading.isSpeech {
+            secondsSinceStartFailure += bufferSeconds
             startSession(triggeredBy: buffer)
         } else {
             appendToPreRoll(buffer, seconds: bufferSeconds)
@@ -127,8 +136,14 @@ final class SessionPipeline {
         let url = Persistence.audioURL(forFileName: fileName)
 
         guard let writer = try? AudioFileWriter(url: url, inputFormat: buffer.format) else {
+            // Speech is being heard and dropped — that must not stay silent.
+            if secondsSinceStartFailure >= 30 {
+                secondsSinceStartFailure = 0
+                dispatchToMain(.sessionStartFailed)
+            }
             return
         }
+        secondsSinceStartFailure = .infinity
 
         let startedAt = Date.now.addingTimeInterval(-preRollSeconds)
         var session = ActiveSession(id: id, fileName: fileName, writer: writer, startedAt: startedAt)
@@ -172,7 +187,6 @@ final class SessionPipeline {
                     fileName: session.fileName,
                     duration: duration,
                     endedAt: session.startedAt.addingTimeInterval(session.clock),
-                    reason: reason,
                     discarded: discarded
                 ))
             }

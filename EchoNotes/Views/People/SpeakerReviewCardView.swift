@@ -17,8 +17,10 @@ struct SpeakerReviewCardView: View {
     @State private var newName = ""
     @FocusState private var nameFieldFocused: Bool
     /// Resolved once per card — body re-evaluates every frame of a card
-    /// drag, and a SwiftData fetch per frame would jank the swipe.
+    /// drag, and a SwiftData fetch (or a disk stat) per frame would jank
+    /// the swipe.
     @State private var session: RecordingSession?
+    @State private var audioExists = false
 
     private var suggestedSpeaker: Speaker? {
         guard let id = item.suggestedSpeakerID else { return nil }
@@ -45,15 +47,21 @@ struct SpeakerReviewCardView: View {
                 .strokeBorder(.quaternary, lineWidth: 1)
         )
         .onAppear { fetchSessionIfNeeded() }
+        // Deleting another recording can re-anchor this card to a different
+        // session (occurrence promotion) while it's on screen.
+        .onChange(of: item.sessionID) { _, _ in
+            playback.stop()
+            fetchSessionIfNeeded()
+        }
         .onDisappear { playback.stop() }
     }
 
     private func fetchSessionIfNeeded() {
         guard session?.id != item.sessionID else { return }
-        let id = item.sessionID
-        var descriptor = FetchDescriptor<RecordingSession>(predicate: #Predicate { $0.id == id })
-        descriptor.fetchLimit = 1
-        session = try? modelContext.fetch(descriptor).first
+        session = RecordingSession.fetch(id: item.sessionID, in: modelContext)
+        audioExists = session?.audioFileURL.map {
+            FileManager.default.fileExists(atPath: $0.path)
+        } ?? false
     }
 
     // MARK: - Pieces
@@ -82,7 +90,7 @@ struct SpeakerReviewCardView: View {
 
     @ViewBuilder
     private var snippetPlayer: some View {
-        if let url = session?.audioFileURL, FileManager.default.fileExists(atPath: url.path) {
+        if audioExists, let url = session?.audioFileURL {
             Button {
                 if playback.isPlaying {
                     playback.pause()

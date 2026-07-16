@@ -33,9 +33,12 @@ enum FallbackSummarizer {
             .map(\.sentence)
             .joined(separator: " ")
 
-        // Key points: next tier of informative sentences, spoken order.
+        // Key points: the next tier of informative sentences, spoken order —
+        // dropping the two that already form the overview, which would
+        // otherwise repeat verbatim.
         let keyPoints = ranked
-            .prefix(5)
+            .dropFirst(2)
+            .prefix(3)
             .sorted { $0.index < $1.index }
             .map { condense($0.sentence) }
 

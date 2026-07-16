@@ -15,8 +15,6 @@ import WhisperKit
 @Observable
 final class EnrichmentModelManager {
     enum ModelState: Equatable {
-        case unknown
-        case checking
         /// Fraction completed, when known.
         case downloading(Double?)
         case ready
@@ -57,8 +55,8 @@ final class EnrichmentModelManager {
         }
     }
 
-    private(set) var whisperState: ModelState = .unknown
-    private(set) var diarizerState: ModelState = .unknown
+    private(set) var whisperState: ModelState = .notDownloaded
+    private(set) var diarizerState: ModelState = .notDownloaded
 
     /// Where the downloaded Whisper model lives, once installed.
     private(set) var whisperModelFolder: URL?
@@ -67,9 +65,14 @@ final class EnrichmentModelManager {
         didSet {
             guard oldValue != selectedVariant else { return }
             UserDefaults.standard.set(selectedVariant.rawValue, forKey: Self.variantKey)
-            // A different variant is a different download.
-            whisperModelFolder = installedWhisperFolder()
-            whisperState = whisperModelFolder == nil ? .notDownloaded : .ready
+            // A different variant is a different download. While a download
+            // is running, only the preference changes — the in-flight
+            // install keeps its own captured variant and reconciles state
+            // when it finishes.
+            if !isDownloading {
+                whisperModelFolder = installedWhisperFolder(for: selectedVariant)
+                whisperState = whisperModelFolder == nil ? .notDownloaded : .ready
+            }
         }
     }
 
@@ -100,12 +103,30 @@ final class EnrichmentModelManager {
     /// Cheap re-check of what's on disk; safe to call at every enable.
     func refreshInstalledState() {
         if !isDownloading {
-            whisperModelFolder = installedWhisperFolder()
+            whisperModelFolder = installedWhisperFolder(for: selectedVariant)
             whisperState = whisperModelFolder == nil ? .notDownloaded : .ready
             diarizerState = UserDefaults.standard.bool(forKey: Self.diarizerInstalledKey)
                 ? .ready
                 : .notDownloaded
         }
+    }
+
+    /// Whether ANY variant's model files are on disk — removal must be
+    /// offered based on this, not on the currently selected variant, or
+    /// switching the picker strands a 626 MB install with no way to delete.
+    var anyVariantInstalled: Bool {
+        WhisperVariant.allCases.contains { installedWhisperFolder(for: $0) != nil }
+    }
+
+    /// An enrichment job failed to load its models: whatever install state
+    /// we believed is stale (OS purged a cache, files vanished). Reset the
+    /// diarizer flag — its cache is FluidAudio's, invisible to our disk
+    /// probe — and re-derive the rest, so Settings shows the re-download
+    /// instead of a permanent "Installed" lie.
+    func noteModelLoadFailure() {
+        guard !isDownloading else { return }
+        UserDefaults.standard.set(false, forKey: Self.diarizerInstalledKey)
+        refreshInstalledState()
     }
 
     /// Downloads whichever of the two model sets is missing. Idempotent and
@@ -134,7 +155,12 @@ final class EnrichmentModelManager {
     // MARK: - Whisper
 
     private func installWhisperIfNeeded() async {
-        if let folder = installedWhisperFolder() {
+        // Snapshot the variant: everything below — the download, the
+        // UserDefaults key, the terminal state — must refer to the variant
+        // this install is FOR, even if the picker changes mid-download.
+        let variant = selectedVariant
+
+        if let folder = installedWhisperFolder(for: variant) {
             whisperModelFolder = folder
             whisperState = .ready
             return
@@ -142,7 +168,7 @@ final class EnrichmentModelManager {
         whisperState = .downloading(nil)
         do {
             let folder = try await WhisperKit.download(
-                variant: selectedVariant.whisperKitModelName,
+                variant: variant.whisperKitModelName,
                 downloadBase: Self.whisperDownloadBase,
                 progressCallback: { progress in
                     let fraction = progress.fractionCompleted
@@ -160,10 +186,16 @@ final class EnrichmentModelManager {
             // canonicalization (/var vs /private/var) makes naive prefix
             // stripping unreliable — anchor on the base folder's name.
             if let relative = Self.pathRelativeToDownloadBase(folder) {
-                UserDefaults.standard.set(relative, forKey: Self.whisperFolderKey(selectedVariant))
+                UserDefaults.standard.set(relative, forKey: Self.whisperFolderKey(variant))
             }
-            whisperModelFolder = folder
-            whisperState = .ready
+            if selectedVariant == variant {
+                whisperModelFolder = folder
+                whisperState = .ready
+            } else {
+                // The picker moved on mid-download; reflect the CURRENT
+                // selection's install state instead of the finished one's.
+                refreshInstalledState()
+            }
         } catch {
             whisperState = .failed("Couldn't download the multilingual model. Check your connection and try again.")
         }
@@ -187,11 +219,11 @@ final class EnrichmentModelManager {
     private static let whisperDownloadBase: URL? = URL.applicationSupportDirectory
         .appending(path: whisperBaseName, directoryHint: .isDirectory)
 
-    /// The folder a previous WhisperKit.download produced for the selected
-    /// variant, when it still exists on disk with model files inside.
-    private func installedWhisperFolder() -> URL? {
+    /// The folder a previous WhisperKit.download produced for a variant,
+    /// when it still exists on disk with model files inside.
+    private func installedWhisperFolder(for variant: WhisperVariant) -> URL? {
         guard let base = Self.whisperDownloadBase,
-              let relative = UserDefaults.standard.string(forKey: Self.whisperFolderKey(selectedVariant)) else {
+              let relative = UserDefaults.standard.string(forKey: Self.whisperFolderKey(variant)) else {
             return nil
         }
         let folder = base.appending(path: relative, directoryHint: .isDirectory)

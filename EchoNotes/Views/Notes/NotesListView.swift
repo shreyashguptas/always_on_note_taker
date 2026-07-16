@@ -83,6 +83,9 @@ struct NotesListView: View {
 
     private func delete(_ toDelete: [RecordingSession]) {
         for session in toDelete {
+            // A session still being recorded can't be deleted out from under
+            // the audio writer — it becomes deletable the moment it ends.
+            guard session.status != .recording else { continue }
             // Stops any in-flight processing of this recording and drops
             // pending voice-review cards that play audio from its file.
             coordinator.sessionWillBeDeleted(session.id)

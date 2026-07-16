@@ -13,7 +13,7 @@ final class RecordingCoordinator {
     enum State: Equatable {
         /// Toggle is off.
         case off
-        /// Toggle on, permissions/model being checked, engine starting.
+        /// Toggle on, permissions being checked, engine starting.
         case starting
         /// Engine running, waiting for speech.
         case listening
@@ -21,7 +21,6 @@ final class RecordingCoordinator {
         case recording
         /// The system took the mic (call, Siri…); we resume when possible.
         case interrupted
-        case error(String)
     }
 
     private(set) var state: State = .off
@@ -32,6 +31,9 @@ final class RecordingCoordinator {
     private(set) var currentSessionStartedAt: Date?
     /// Why AI summaries are degraded right now, if they are (checked at enable).
     private(set) var aiUnavailabilityMessage: String?
+    /// Set while speech is being heard but can't be written to disk (disk
+    /// full…); cleared when a session starts successfully or listening stops.
+    private(set) var recordingProblemMessage: String?
     /// Per-session progress of the transcription pass, for row/banner UI.
     private(set) var enrichmentProgress: [UUID: TranscriptEnrichmentService.Phase] = [:]
 
@@ -44,6 +46,11 @@ final class RecordingCoordinator {
     private let modelContext: ModelContext
     private var resumeTask: Task<Void, Never>?
     private var activeSessionID: UUID?
+    /// Sessions the user deleted this launch. A progress callback already in
+    /// flight when a note is deleted must not resurrect its
+    /// enrichmentProgress entry — cancelled jobs fire no terminal callback,
+    /// so a resurrected entry would never clear.
+    private var deletedSessions: Set<UUID> = []
 
     init(modelContext: ModelContext) {
         self.modelContext = modelContext
@@ -60,13 +67,14 @@ final class RecordingCoordinator {
         }
 
         enrichment.onProgress = { [weak self] id, phase in
-            self?.enrichmentProgress[id] = phase
+            guard let self, !self.deletedSessions.contains(id) else { return }
+            self.enrichmentProgress[id] = phase
         }
         enrichment.onFinished = { [weak self] id, segments, clusters in
             self?.finishEnrichment(for: id, segments: segments, clusters: clusters)
         }
-        enrichment.onFailed = { [weak self] id, message in
-            self?.failEnrichment(for: id, message: message)
+        enrichment.onFailed = { [weak self] id, reason in
+            self?.failEnrichment(for: id, reason: reason)
         }
 
         // Main-actor ordering guarantees this runs before any user-initiated
@@ -105,10 +113,20 @@ final class RecordingCoordinator {
 
         // Recording never blocks on the transcription models: sessions
         // captured before they're downloaded are kept and transcribed once
-        // they are (Retry on the note, or automatically on relaunch).
+        // they are.
         enrichmentModels.refreshInstalledState()
+        transcribeBacklog()
         aiUnavailabilityMessage = SummarizationService.unavailabilityMessage
 
+        startCaptureOrRetry()
+    }
+
+    /// Foreground kick: if the toggle is on but capture died while the app
+    /// was away (an interruption whose end notification iOS never
+    /// delivered), reclaim the mic now rather than waiting for a
+    /// notification that may never come.
+    func applicationDidBecomeActive() {
+        guard isEnabled, !capture.isRunning else { return }
         startCaptureOrRetry()
     }
 
@@ -117,6 +135,7 @@ final class RecordingCoordinator {
         resumeTask?.cancel()
         resumeTask = nil
         currentSessionStartedAt = nil
+        recordingProblemMessage = nil
         pipeline.stop(reason: .manualStop) { [weak self] in
             // If the user re-enabled before this deferred stop landed, the
             // fresh engine must not be torn down by the old disable.
@@ -174,6 +193,11 @@ final class RecordingCoordinator {
             // note gets generated rather than sitting open indefinitely.
             pipeline.stop(reason: .interruption)
             currentSessionStartedAt = nil
+            // Don't rely on the interruption-ended notification — iOS
+            // documents it may never arrive (e.g. the app was suspended
+            // during the call). The retry loop reclaims the mic as soon as
+            // the system allows and no-ops while it's still held.
+            scheduleResumeAttempts()
 
         case .interruptionEndedShouldResume, .interruptionEnded:
             startCaptureOrRetry()
@@ -219,9 +243,15 @@ final class RecordingCoordinator {
             try? modelContext.save()
             activeSessionID = id
             currentSessionStartedAt = startedAt
+            recordingProblemMessage = nil
             if isEnabled { state = .recording }
 
-        case .sessionEnded(let id, let fileName, let duration, let endedAt, _, let discarded):
+        case .sessionStartFailed:
+            // Speech is being heard and lost — say so instead of showing a
+            // healthy "Listening" screen.
+            recordingProblemMessage = "Recording isn't working — speech can't be saved right now. Check free storage."
+
+        case .sessionEnded(let id, let fileName, let duration, let endedAt, let discarded):
             if activeSessionID == id {
                 activeSessionID = nil
                 currentSessionStartedAt = nil
@@ -267,16 +297,20 @@ final class RecordingCoordinator {
     // MARK: - Post-session enrichment (multilingual transcript + speakers)
 
     /// Queues the enrichment pass; returns false when it can't run (models
-    /// not downloaded, no audio file).
+    /// not downloaded, audio missing or unreadable). The readability probe
+    /// matters: a half-written file from a mid-recording kill would
+    /// otherwise be enqueued, fail, and offer a Retry that can never work.
     private func startEnrichmentIfPossible(for session: RecordingSession) -> Bool {
         guard enrichmentModels.isReady,
               let whisperFolder = enrichmentModels.whisperModelFolder,
               let audioURL = session.audioFileURL,
-              FileManager.default.fileExists(atPath: audioURL.path) else {
+              let audioSeconds = Self.readableAudioSeconds(of: audioURL),
+              audioSeconds >= AppSettings.minimumSessionDuration else {
             return false
         }
         session.status = .enriching
         session.enrichmentState = .pending
+        session.enrichmentFailureReasonRaw = nil
         try? modelContext.save()
         enrichment.enqueue(TranscriptEnrichmentService.Job(
             sessionID: session.id,
@@ -340,28 +374,47 @@ final class RecordingCoordinator {
         }
         session.rebuildTranscriptPreview(from: segments.map(\.text))
         session.enrichmentState = .done
+        session.enrichmentFailureReasonRaw = nil
 
-        speakerIdentity.processClusters(clusters, sessionID: id)
+        let assignedNames = speakerIdentity.processClusters(clusters, sessionID: id)
         if segments.isEmpty {
             session.status = .complete
             try? modelContext.save()
         } else {
-            summarize(session)
+            // Build the summarizer input from the structs in hand rather
+            // than re-faulting and re-sorting the thousands of segments
+            // that were just inserted.
+            let transcript = TranscriptFormatting.attributedText(segments.map {
+                TranscriptFormatting.Line(
+                    text: $0.text,
+                    languageCode: $0.languageCode,
+                    speakerKey: $0.speakerKey,
+                    speakerName: $0.speakerKey.flatMap { assignedNames[$0] }
+                )
+            })
+            summarize(session, transcript: transcript)
         }
     }
 
-    private func failEnrichment(for id: UUID, message: String) {
+    private func failEnrichment(for id: UUID, reason: TranscriptEnrichmentService.FailureReason) {
         enrichmentProgress.removeValue(forKey: id)
-        guard let session = fetchSession(id: id) else { return }
 
+        // Model files vanishing (OS purged a cache, interrupted install) is
+        // system state, not session state — reflect it in Settings so the
+        // fix is one obvious re-download away.
+        if reason == .modelLoadFailed {
+            enrichmentModels.noteModelLoadFailure()
+        }
+
+        guard let session = fetchSession(id: id) else { return }
         session.enrichmentState = .failed
+        session.enrichmentFailureReasonRaw = reason.rawValue
         if session.segments.isEmpty {
-            // No preliminary transcript existed to fall back to (live
-            // transcription was unavailable or heard nothing).
+            // No earlier transcript exists to fall back to.
             session.status = .failed
             try? modelContext.save()
         } else {
-            // The preliminary transcript is untouched (replacement only
+            // The existing transcript is untouched (replacement only
             // happens on success); finish the note from it.
             summarize(session)
         }
@@ -371,6 +424,7 @@ final class RecordingCoordinator {
     /// for it and drops pending voice-review cards that would point at its
     /// (soon to be deleted) audio.
     func sessionWillBeDeleted(_ sessionID: UUID) {
+        deletedSessions.insert(sessionID)
         enrichment.cancel(sessionID: sessionID)
         enrichmentProgress.removeValue(forKey: sessionID)
         speakerIdentity.purgeReviewItems(for: sessionID)
@@ -385,16 +439,17 @@ final class RecordingCoordinator {
 
     // MARK: - Note generation
 
-    private func summarize(_ session: RecordingSession) {
+    /// `transcript` lets callers that already hold the transcript text (the
+    /// enrichment finish path) skip re-reading every segment; by default the
+    /// speaker/language-annotated transcript is built from the model.
+    private func summarize(_ session: RecordingSession, transcript: String? = nil) {
         session.status = .summarizing
         try? modelContext.save()
 
         let id = session.id
-        // Speaker- and language-annotated when enrichment ran; the plain
-        // transcript otherwise.
-        let transcript = session.attributedTranscript
+        let text = transcript ?? session.attributedTranscript
         Task { [weak self] in
-            let result = await SummarizationService.generateNote(from: transcript)
+            let result = await SummarizationService.generateNote(from: text)
             self?.attachNote(result, to: id)
         }
     }
@@ -455,9 +510,15 @@ final class RecordingCoordinator {
                 session.endedAt = session.startedAt.addingTimeInterval(max(lastEnd, session.duration))
             }
 
-            // Prefer re-running the multilingual/speaker pass whenever it
-            // can run — it supersedes whatever transcript state was left.
-            if startEnrichmentIfPossible(for: session) { continue }
+            // Prefer re-running the transcription pass whenever it can run —
+            // EXCEPT when it already finished (.done): the transcript is
+            // final and speaker identification already ran; re-running would
+            // double-count voice evidence (self-matching review cards,
+            // double-folded voiceprints). A .done orphan just needs its note.
+            if session.enrichmentState != .done,
+               startEnrichmentIfPossible(for: session) {
+                continue
+            }
 
             if segments.isEmpty {
                 // No transcript — but the audio is transcribable once the
@@ -495,14 +556,13 @@ final class RecordingCoordinator {
     // MARK: - Helpers
 
     private func fetchSession(id: UUID) -> RecordingSession? {
-        var descriptor = FetchDescriptor<RecordingSession>(predicate: #Predicate { $0.id == id })
-        descriptor.fetchLimit = 1
-        return try? modelContext.fetch(descriptor).first
+        RecordingSession.fetch(id: id, in: modelContext)
     }
 
     /// Playable length of a session's audio file, or nil when the file is
-    /// missing/unreadable (e.g. a writer killed mid-header).
-    private static func readableAudioSeconds(of url: URL?) -> TimeInterval? {
+    /// missing/unreadable (e.g. a writer killed mid-header). Also used by
+    /// the note detail view to decide whether Retry can possibly work.
+    static func readableAudioSeconds(of url: URL?) -> TimeInterval? {
         guard let url, FileManager.default.fileExists(atPath: url.path),
               let file = try? AVAudioFile(forReading: url) else {
             return nil
