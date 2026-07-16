@@ -15,6 +15,8 @@ A native SwiftUI app for iPhone and iPad that does what the Plaud AI note taker 
 
 ## Building
 
+> Automating this with an AI agent (or building from the command line)? See [CLAUDE.md](CLAUDE.md) for CLI build/test/device-install instructions and the full operations guide.
+
 The Xcode project is generated with [XcodeGen](https://github.com/yonaskolb/XcodeGen) (the `.xcodeproj` is not committed):
 
 ```sh
