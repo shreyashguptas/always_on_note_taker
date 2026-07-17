@@ -74,9 +74,16 @@ enum AppSettings {
     /// ("Is this Priya?") without auto-tagging.
     static let speakerSuggestThreshold: Float = 0.50
 
+    /// Two clusters within one session whose voiceprints are at least this
+    /// similar are treated as one voice the diarizer accidentally split —
+    /// merged before the transcript and review cards are built. Kept above
+    /// what two family members typically score so real pairs don't fold.
+    static let speakerClusterMergeThreshold: Float = 0.6
+
     /// Voices with less net speech than this in a session are ignored for
-    /// identification (TV in the background, passersby).
-    static let speakerMinimumSpeech: TimeInterval = 8
+    /// identification (TV in the background, passersby). Low enough that a
+    /// short ~20 s memo still yields a review card for its speaker.
+    static let speakerMinimumSpeech: TimeInterval = 5
 
     /// Length of the audio snippet a review card plays for an unknown voice.
     static let speakerSnippetDuration: TimeInterval = 10

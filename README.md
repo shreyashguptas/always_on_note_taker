@@ -29,13 +29,13 @@ Then in Xcode:
 
 1. Select the **EchoNotes** target → Signing & Capabilities → pick your **Team** (automatic signing).
 2. Select your device and Run.
-3. On first launch, allow **microphone** access and download the on-device transcription models (the Record tab's banner or the gear icon takes you there; recordings made before the download are transcribed once it finishes).
+3. On first launch, allow **microphone** access and download the on-device transcription models (the Record tab's banner or the gear icon takes you there; recordings made before the download are transcribed once it finishes). Settings → About shows the exact version and git commit of the build you're running.
 
 ## Using the app
 
 Three tabs:
 
-- **Record** — one big button. Turn it on and leave it on: the app keeps listening (including with the screen locked or the app in the background), waits for speech, and automatically cuts recordings into sessions when a long silence occurs. Each session becomes a note; while one is being transcribed, a progress card shows on this screen. The gear icon opens Settings, where you download the transcription + speaker models (one-time; the "Best" Whisper model is ~626 MB).
+- **Record** — one big button. Turn it on and leave it on: the app keeps listening (including with the screen locked or the app in the background), waits for speech, and automatically cuts recordings into sessions when a long silence occurs. Each session becomes a note; while one is being transcribed, a progress card shows on this screen. The gear icon opens Settings, where one button downloads the transcription + speaker models (one-time, ~700 MB total) — sequentially, with a live percentage per model, continuing in the background if you leave the app, and resuming from where it stopped if interrupted.
 - **Notes** — your library, newest first, grouped by day, searchable. Each note has three views: **Transcript** (timestamped, speaker-labeled, language-badged; tap a line to hear that moment), **Summary** (overview, key points, action items with owners' names, tags — regenerate anytime), and **Audio** (playback with scrubbing).
 - **People** — when a recording is processed, each new voice becomes a review card: play a ten-second sample and name the person (or tap "Me"). Named voices are recognized automatically from then on; you can rename, merge, or remove people anytime.
 
@@ -54,6 +54,7 @@ iOS allows continuous background microphone recording only while the app is acti
 - UI strings and duration formatting are English-only (transcription itself handles ~100 languages).
 - **No live transcript while recording** — by design: transcription runs right after each session ends, so the accurate multilingual version is the only one you ever see, and all-day listening stays battery-friendly.
 - **Language detection granularity:** Whisper detects one language per ~30-second stretch, so a mid-sentence switch ("Hinglish") is transcribed in whichever language dominates that stretch.
+- **No Lock Screen recording indicator yet** beyond the system's orange mic dot — a Live Activity with a stop button is planned; see [LIVE_ACTIVITY_PLAN.md](LIVE_ACTIVITY_PLAN.md).
 
 ## Privacy
 

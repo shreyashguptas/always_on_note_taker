@@ -202,7 +202,12 @@ struct RecordView: View {
         }
     }
 
+    /// Progress of whichever model set is currently downloading (they run
+    /// one at a time — speaker models first, then Whisper).
     private var downloadFraction: Double? {
+        if case .downloading(let fraction) = coordinator.enrichmentModels.diarizerState {
+            return fraction
+        }
         if case .downloading(let fraction) = coordinator.enrichmentModels.whisperState {
             return fraction
         }

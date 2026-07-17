@@ -26,21 +26,41 @@ audio/transcripts anywhere. Airplane mode is the acceptance test.
 | `project.yml` | XcodeGen spec — the `.xcodeproj` is NOT committed; regenerate after editing this |
 | `EchoNotes/App/` | `EchoNotesApp` (entry, DI), `RootTabView` (Record / Notes / People tabs) |
 | `EchoNotes/Models/` | SwiftData `@Model`s: `RecordingSession`, `TranscriptSegment`, `GeneratedNote`, `Speaker`, `SpeakerReviewItem` — schema assembled in `Support/Persistence.swift`; keep changes additive (lightweight migration only) |
-| `EchoNotes/Services/` | The pipeline. Capture: `AudioCaptureService` → `SessionPipeline` (VAD, pre-roll, per-session `.m4a`). Post-session: `TranscriptEnrichmentService` (WhisperKit + FluidAudio, windowed decode) → `SpeakerIdentityService` (voiceprint matching) → `SummarizationService` (FoundationModels, `FallbackSummarizer` when Apple Intelligence is unavailable). Orchestrated by `RecordingCoordinator`. Model downloads: `EnrichmentModelManager` |
-| `EchoNotes/Support/` | Pure helpers: `TranscriptFormatting` (canonical speaker numbering + language markers), `VoiceEmbedding` (cosine/running-mean), `SpeakerAttribution` (word→turn merge), `AppSettings` (all tunables) |
+| `EchoNotes/Services/` | The pipeline. Capture: `AudioCaptureService` → `SessionPipeline` (VAD, pre-roll, per-session `.m4a`). Post-session: `TranscriptEnrichmentService` (WhisperKit + FluidAudio, windowed decode) → `SpeakerIdentityService` (voiceprint matching) → `SummarizationService` (FoundationModels, `FallbackSummarizer` when Apple Intelligence is unavailable). Orchestrated by `RecordingCoordinator`. Model downloads: `EnrichmentModelManager` (state machine) + `WhisperModelDownloader` (background URLSession, survives app suspension/relaunch) |
+| `EchoNotes/Support/` | Pure helpers: `TranscriptFormatting` (canonical speaker numbering + language markers), `VoiceEmbedding` (cosine/running-mean), `SpeakerAttribution` (word→turn merge), `SpeakerClusterMerging` (re-joins voices the diarizer over-split), `AppSettings` (all tunables) |
 | `EchoNotes/Views/` | SwiftUI, grouped by tab |
 | `EchoNotesTests/` | Swift Testing unit tests — pure logic only, run in the simulator |
 | `TESTING.md` | The on-device smoke checklist (the real acceptance suite) |
+| `LIVE_ACTIVITY_PLAN.md` | Blueprint for the future Lock-Screen recording indicator (ActivityKit) — read before building that feature |
 
 Third-party deps (SPM, declared in `project.yml`): **WhisperKit 1.0.0** and
 **FluidAudio 0.12.4**, pinned **exactly** — both SDKs have had API churn.
 `TranscriptEnrichmentService` and `EnrichmentModelManager` are the only two
 files that touch their APIs; when bumping a pin, verify
-`WhisperKit.download(variant:downloadBase:progressCallback:)`,
 `WhisperKit(WhisperKitConfig)`, `transcribe(audioArray:decodeOptions:)`,
-`DiarizerModels.downloadIfNeeded()`, `DiarizerManager.initialize(models:)`,
-and `performCompleteDiarization(_:)` still match, then re-run the
-"Transcription robustness" section of TESTING.md on a device.
+`DiarizerModels.downloadIfNeeded(progressHandler:)`,
+`DiarizerManager.initialize(models:)`, `performCompleteDiarization(_:)`,
+and that `TimedSpeakerSegment` still carries `embedding` (the voiceprint
+source — `DiarizationResult.speakerDatabase` is **debug-mode-only**, do not
+rely on it), then re-run the "Transcription robustness" section of
+TESTING.md on a device. The Whisper model files themselves are fetched by
+`WhisperModelDownloader` (our own background-URLSession downloader against
+the `argmaxinc/whisperkit-coreml` Hugging Face repo — file list from the
+tree API, per-file size verification, resume-from-partial); WhisperKit only
+loads the folder it produces.
+
+## Versioning (required on every PR)
+
+Every PR to `main` must bump the app version in `project.yml`:
+
+- `MARKETING_VERSION` — semver-ish: minor bump for feature work
+  (1.1.0 → 1.2.0), patch bump for fixes (1.1.0 → 1.1.1).
+- `CURRENT_PROJECT_VERSION` — always +1.
+
+A build script stamps the short git commit into the built Info.plist
+(`GitCommit`); Settings → About shows "Version X.Y.Z (build) abc1234" and
+links to that commit on GitHub. This is how the owner knows which build is
+on the phone — do not skip the bump.
 
 ## Mac prerequisites
 
@@ -117,9 +137,13 @@ xcrun devicectl device process launch --device <UDID> com.shreyashg.echonotes
    trust the developer certificate.
 2. Allow **microphone** access when prompted.
 3. Tap **Set up** on the Record tab banner (or the gear icon) and download
-   the models — "Best" Whisper (~626 MB) + speaker models (~80 MB), Wi-Fi
-   recommended. Recordings made before the download finishes are kept and
-   transcribed automatically afterwards.
+   the models — speaker models (~80 MB) first, then Whisper Large v3 Turbo
+   (~626 MB), sequential with per-model percentages; Wi-Fi recommended. The
+   Whisper download continues in the background if you leave the app, and a
+   Retry resumes from the files already fetched. After the download the row
+   shows "Preparing…" once while the model is verified/warmed. Recordings
+   made before the download finishes are kept and transcribed automatically
+   afterwards.
 4. Sanity-check the privacy claim: enable Airplane Mode and confirm
    record → transcribe → note still works end-to-end.
 
@@ -150,6 +174,11 @@ highest-value checks:
   starting points, meant to be tuned against the owner's real family audio.
   Too many "Is this X?" cards → lower the threshold slightly; any wrong
   auto-tag → raise it or widen the margin.
+- `AppSettings.speakerClusterMergeThreshold` (0.6): within-session repair of
+  diarizer over-splits (one quiet voice showing as two speakers). Two real
+  people merged into one speaker → raise it; one person still split in two →
+  lower it. `speakerMinimumSpeech` (5 s) is the floor for a voice to get a
+  review card at all.
 - Language detection is per ~30 s stretch — mid-sentence code-switching
   labels as the dominant language of that stretch.
 - Deliberately deferred (do not "fix" casually; each needs on-device

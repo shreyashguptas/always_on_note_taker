@@ -41,11 +41,12 @@ device (iPhone 15 Pro or newer / M-series iPad) with Apple Intelligence enabled.
 - [ ] On a non-Apple-Intelligence device: notes still generate via the basic summarizer and the info banner explains why; key points do NOT repeat the overview sentences.
 
 ## Transcription + speaker models (Settings)
-- [ ] Settings → Download models shows progress for the language model; both rows flip to "Installed"; the Record tab banner disappears.
-- [ ] Kill the app mid-download, reopen, download again → completes (or resumes) without a corrupt state.
-- [ ] Switch the model picker between Best and Compact → the other variant shows "Not downloaded" until fetched.
+- [ ] One "Download models" button covers both rows; downloads run one at a time — speaker models first with a percentage, then the Whisper model with a percentage; both rows flip to "Installed" (Whisper shows "Preparing…" briefly first); the Record tab banner disappears.
+- [ ] Go to the home screen mid-Whisper-download → come back a minute later → the percentage has ADVANCED (the download ran in the background, it didn't freeze).
+- [ ] Kill the app mid-Whisper-download, reopen → the download resumes on its own from where it left off (not from 0%).
+- [ ] Turn off Wi-Fi mid-download → row shows the failure message and the button becomes "Retry download"; retry after reconnecting continues from the already-downloaded files (visibly faster than a fresh download).
 - [ ] Remove downloaded models → rows return to "Not downloaded"; recording still works (sessions parked audio-only until models return); removal is blocked while a recording is being transcribed.
-- [ ] Download Best, switch the picker to Compact → "Remove downloaded models" is still offered (the Best install must not be stranded); switching back to Best flips it to Installed and sweeps any parked recordings.
+- [ ] Settings → About shows the app version and a short commit hash; tapping it opens that commit on GitHub.
 
 ## Multilingual transcription (models installed)
 - [ ] Record a session switching languages in ~1-minute blocks (e.g. Hindi → English → Spanish) → after "Transcribing…", segments carry the right text per language; non-dominant languages get a capsule badge (e.g. "Hindi").
@@ -55,6 +56,7 @@ device (iPhone 15 Pro or newer / M-series iPad) with Apple Intelligence enabled.
 - [ ] Summary of a multilingual recording is written in English and doesn't invent content for the non-English parts ⭐.
 
 ## Speaker recognition (models installed)
+- [ ] Record ~30 s alone (one voice, normal + quiet passages) → the transcript shows ONE speaker, and the People tab shows exactly one review card that plays your voice.
 - [ ] Record a 2–3 person conversation → transcript groups lines under "Speaker 1/2/3" with colored dots.
 - [ ] People tab badge shows the new-voice count; each card plays a ~10 s sample of the right voice.
 - [ ] Naming a card (new name, "Me", or an existing person) immediately labels that speaker's lines in the transcript.
